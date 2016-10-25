@@ -68,8 +68,6 @@ static void populate_cache(tdb *db, struct tdb_file *region, uint64_t requested_
     region->cached_data = src_region.data;
     region->cached_first_page = 0;
     region->cached_size = src_region.size;
-
-    fprintf(stderr, "populate cache for %s\n", region->fname);
 }
 
 static void handle_pagefault(tdb *db, uint64_t addr)
@@ -122,13 +120,16 @@ static void *pagefault_thread(void *arg)
     struct pollfd pollfd[1];
 
     pollfd[0].fd = db->external_uffd;
-    pollfd[0].events = POLLIN;
+    pollfd[0].events = POLLIN | POLLRDHUP;
 
     while (1){
         struct uffd_msg msg;
-        int pollres = poll(pollfd, 1, 10000);
+        /*
+        note that we need a short timeout since close() doesn't seem
+        to wake up poll but we notice it at the timeout
+        */
+        int pollres = poll(pollfd, 1, 100);
         ssize_t len;
-
         switch (pollres) {
             case 0:
                 continue;
@@ -138,8 +139,9 @@ static void *pagefault_thread(void *arg)
                 warn("tdb_external: unexpected poll result (%d)\n", pollres);
                 continue;
         }
-        if (pollfd[0].revents & POLLNVAL)
+        if (pollfd[0].revents & POLLNVAL || pollfd[0].revents & POLLRDHUP){
             break; /* closed */
+        }
 
         if (pollfd[0].revents & POLLERR){
             warn("tdb_external: unexpected POLLERR\n");
@@ -160,7 +162,6 @@ static void *pagefault_thread(void *arg)
         if (msg.event & UFFD_EVENT_PAGEFAULT)
             handle_pagefault(db, msg.arg.pagefault.address);
     }
-    printf("EXIT\n");
     return NULL;
 }
 
@@ -176,44 +177,32 @@ tdb_error open_external(tdb *db, const char *root)
     if (!(db->external_page_buffer = malloc(PAGESIZE)))
         return TDB_ERR_NOMEM;
 
-    fprintf(stderr, "cp 0\n");
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wconversion"
     db->external_uffd = syscall(__NR_userfaultfd, O_CLOEXEC | O_NONBLOCK);
 #pragma GCC diagnostic pop
     if (db->external_uffd == -1)
         return TDB_ERR_IO_READ; /* FIXME */
-    fprintf(stderr, "cp 1\n");
+
     uffdio_api.api = UFFD_API;
     uffdio_api.features = 0;
     if (ioctl(db->external_uffd, UFFDIO_API, &uffdio_api) == -1)
         return TDB_ERR_IO_READ; /* FIXME */
-    fprintf(stderr, "cp 2\n");
 
     if (uffdio_api.api != UFFD_API)
         return TDB_ERR_IO_READ; /* FIXME */
-    fprintf(stderr, "cp 3\n");
 
     if (pthread_create(&db->external_pagefault_thread,
                        NULL,
                        pagefault_thread,
                        db))
         return TDB_ERR_IO_READ; /* FIXME */
-    fprintf(stderr, "cp 4\n");
 
     return 0;
 }
 
 void free_external(tdb *db)
 {
-    /*
-    TODO check if this is necessary
-    unregister all
-    if (ioctl(uffd, UFFDIO_UNREGISTER, &uffdio_register.range)) {
-        fprintf(stderr, "ioctl unregister failure\n");
-        return 1;
-    }
-    */
     Word_t tmp = 0;
     Word_t *ptr;
     int ret;
@@ -228,13 +217,11 @@ void free_external(tdb *db)
 
         range.start = (uint64_t)region->ptr;
         range.len = region->mmap_size;
-        if (ioctl(db->external_uffd, UFFDIO_UNREGISTER, &range) == -1){
-            perror("fuu\n");
+        if (ioctl(db->external_uffd, UFFDIO_UNREGISTER, &range) == -1)
             die("tdb_external: UFFDIO_UNREGISTER failed %d\n", errno);
-        }
+
         JLN(ptr, db->external_regions, tmp);
     }
-
     free(db->external_page_buffer);
     if (db->external_uffd)
         close(db->external_uffd);
