@@ -28,6 +28,7 @@ def configure(cnf):
 
     cnf.define("DSFMT_MEXP", 521)
     cnf.define("HAVE_ARCHIVE_H", 1)
+    cnf.define("TDB_EXTERNAL", 1)
     cnf.env.append_value("CFLAGS", "-std=c99")
     cnf.env.append_value("CFLAGS", "-O3")
     cnf.env.append_value("CFLAGS", "-g")

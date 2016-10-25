@@ -11,6 +11,11 @@
 #include "tdb_profile.h"
 #include "tdb_io.h"
 
+#ifdef TDB_EXTERNAL
+#include <pthread.h>
+#include <Judy.h>
+#endif
+
 #define TDB_EXPORT __attribute__((visibility("default")))
 
 /*
@@ -88,8 +93,16 @@ struct _tdb_cons {
 struct tdb_file {
     char *ptr;
     const char *data;
+
     uint64_t size;
     uint64_t mmap_size;
+
+#ifdef TDB_EXTERNAL
+    const char *fname;
+    const char *cached_data;
+    uint64_t cached_first_page;
+    uint64_t cached_size;
+#endif
 };
 
 struct tdb_lexicon {
@@ -126,6 +139,14 @@ struct _tdb {
 
     FILE *package_handle;
     void *package_toc;
+
+#ifdef TDB_EXTERNAL
+    /* tdb_external */
+    int external_uffd;
+    Pvoid_t external_regions;
+    pthread_t external_pagefault_thread;
+    char *external_page_buffer;
+#endif
 
     /* options */
 

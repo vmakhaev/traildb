@@ -16,6 +16,7 @@
 #include "tdb_io.h"
 #include "tdb_huffman.h"
 #include "tdb_package.h"
+#include "tdb_external.h"
 
 #define DEFAULT_OPT_CURSOR_EVENT_BUFFER_SIZE 1000
 
@@ -327,11 +328,19 @@ TDB_EXPORT tdb_error tdb_open(tdb *db, const char *orig_root)
         io.mmap = file_mmap;
     }else{
         /* open tdb in a tarball */
+        io.fopen = external_fopen;
+        io.fclose = external_fclose;
+        io.mmap = external_mmap;
+        if ((ret = open_external(db, root)))
+            goto done;
+        /*
+        FIXME - this is disabled for development
         io.fopen = package_fopen;
         io.fclose = package_fclose;
         io.mmap = package_mmap;
         if ((ret = open_package(db, root)))
             goto done;
+        */
     }
 
     if ((ret = read_info(db, root, &io)))
@@ -380,7 +389,8 @@ TDB_EXPORT tdb_error tdb_open(tdb *db, const char *orig_root)
         }
     }
 done:
-    free_package(db);
+    /* FIXME free this in the package mode */
+    //free_package(db);
     return ret;
 }
 
@@ -414,6 +424,9 @@ TDB_EXPORT void tdb_close(tdb *db)
 {
     if (db){
         tdb_field i;
+
+        if (db->external_uffd)
+            free_external(db);
 
         if (db->num_fields > 0){
             for (i = 0; i < db->num_fields - 1; i++){
