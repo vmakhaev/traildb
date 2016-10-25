@@ -123,10 +123,10 @@ void free_package(tdb *db)
         fclose(db->package_handle);
 }
 
-static int toc_get(const tdb *db,
-                   const char *fname,
-                   uint64_t *offset,
-                   uint64_t *size)
+int package_toc_get(const tdb *db,
+                    const char *fname,
+                    uint64_t *offset,
+                    uint64_t *size)
 {
     const struct pkg_toc *toc = (const struct pkg_toc*)db->package_toc;
     uint64_t i;
@@ -142,6 +142,7 @@ static int toc_get(const tdb *db,
             *size = toc[i].size;
             return 0;
         }
+
     return -1;
 }
 
@@ -150,7 +151,7 @@ FILE *package_fopen(const char *fname,
                     const tdb *db)
 {
     uint64_t offset, size;
-    if (toc_get(db, fname, &offset, &size))
+    if (package_toc_get(db, fname, &offset, &size))
         return NULL;
     if (fseek(db->package_handle, (off_t)offset, SEEK_SET) == -1)
         return NULL;
@@ -176,7 +177,7 @@ int package_mmap(const char *fname,
 
     int fd = fileno(db->package_handle);
     uint64_t offset, shift;
-    if (toc_get(db, fname, &offset, &dst->size))
+    if (package_toc_get(db, fname, &offset, &dst->size))
         return -1;
 
     shift = offset & ((uint64_t)(getpagesize() - 1));

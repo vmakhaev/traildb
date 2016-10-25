@@ -25,4 +25,9 @@ int package_mmap(const char *fname,
                  struct tdb_file *dst,
                  const tdb *db);
 
+int package_toc_get(const tdb *db,
+                    const char *fname,
+                    uint64_t *offset,
+                    uint64_t *size);
+
 #endif /* __TDB_PACKAGE_H__ */
