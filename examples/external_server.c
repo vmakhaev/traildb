@@ -25,6 +25,15 @@
         fprintf(stderr, fmt, ##__VA_ARGS__);\
     }
 
+#define PEER_MSG(fmt, ...) {\
+    if (verbose){\
+        int _port;\
+        const char *_ip = get_addr(fd, &_port);\
+        fprintf(stderr, "[%s:%d] ", _ip, _port);\
+        fprintf(stderr, fmt, ##__VA_ARGS__);\
+    }\
+}
+
 #define REQUEST_HEAD_SIZE 28
 struct tdb_ext_request{
     char type[4];
@@ -91,9 +100,9 @@ static const char *get_addr(int fd, int *port)
     socklen_t addr_len = sizeof(struct sockaddr_storage);
 
     if (getpeername(fd, (struct sockaddr*)&addr, &addr_len))
-        die("getpeerame failed\n");
+        die("Getpeerame failed\n");
     if (!inet_ntop(AF_INET, &in->sin_addr, buffer, sizeof(buffer)))
-        die("formatting peer address failed\n");
+        die("Formatting peer address failed\n");
 
     *port = ntohs(in->sin_port);
     return buffer;
@@ -182,16 +191,20 @@ static int receive_request(int fd, struct tdb_ext_request *req)
 
 static int handle_request(int fd, const struct tdb_ext_request *req)
 {
+    printf("Got message %.4s root %.*s fname %.*s\n",
+           req->type,
+           req->root_len,
+           req->root,
+           req->fname_len,
+           req->fname);
+    if (!memcmp(req->type, "V000", 4))
+        return 0;
+    if (!memcmp(req->type, "READ", 4))
+        return 0;
     if (!memcmp(req->type, "DONE", 4))
         return 1;
-    else{
-        printf("Got message %.4s root %.*s fname %.*s\n",
-               req->type,
-               req->root_len,
-               req->root,
-               req->fname_len,
-               req->fname);
-    }
+    else
+        return -1;
     return 0;
 }
 
@@ -210,46 +223,44 @@ static void server(int port, int verbose)
     while ((nfds = epoll_wait(efd, epoll_events, MAX_EPOLL_EVENTS, -1)) != -1){
         for (i = 0; i < nfds; i++){
             uint32_t ev = epoll_events[i].events;
-            int port, fd = epoll_events[i].data.fd;
-            const char *ip;
+            int fd = epoll_events[i].data.fd;
 
             /* closed connection */
             if ((ev & EPOLLERR) || (ev & EPOLLHUP) || (ev & EPOLLRDHUP)){
-                ip = get_addr(fd, &port);
-                DEBUG_MSG("Closing connection to %s:%d\n", ip, port);
+                PEER_MSG("Connection closed unexpectedly\n");
                 close(fd);
 
             /* new connection */
             }else if ((ev & EPOLLIN) && fd == server_sock){
-                struct sockaddr addr;
-                socklen_t len;
-                int sock = accept(fd, (struct sockaddr*)&addr, &len);
-
-                if (sock < 0)
+                struct sockaddr_in addr;
+                socklen_t len = sizeof(struct sockaddr_in);
+                if ((fd = accept(fd, (struct sockaddr*)&addr, &len)) < 0)
                     die("Accepting a new connection failed\n");
-
-                ip = get_addr(sock, &port);
-                DEBUG_MSG("New connection from %s:%d\n", ip, port);
-                add_to_epoll(efd, sock);
+                PEER_MSG("New connection\n");
+                add_to_epoll(efd, fd);
 
             /* new message */
             }else if (ev & EPOLLIN){
                 struct tdb_ext_request req;
                 int ret = receive_request(fd, &req);
                 if (ret){
-                    ip = get_addr(fd, &port);
                     if (ret == -1){
-                        DEBUG_MSG("Truncated message from %s:%d\n", ip, port);
+                        PEER_MSG("Truncated message\n");
                     }else if (ret == -2){
-                        DEBUG_MSG("Message timeout from %s:%d\n", ip, port);
+                        PEER_MSG("Message timeout\n");
                     }else{
-                        DEBUG_MSG("Oversized message from %s:%d\n", ip, port);
+                        PEER_MSG("Oversized message\n");
                     }
                     close(fd);
                 }else{
-                    if (handle_request(fd, &req)){
-                        ip = get_addr(fd, &port);
-                        DEBUG_MSG("%s:%d closed connection\n", ip, port);
+                    int ret = handle_request(fd, &req);
+                    if (ret){
+                        if (ret == 1){
+                            PEER_MSG("Closed connection\n");
+                        }else{
+                            PEER_MSG("Sent an unknown request, type '%.4s'\n",
+                                     req.type);
+                        }
                         close(fd);
                     }
                 }
