@@ -285,7 +285,9 @@ static tdb_error read_info(tdb *db, const char *root, struct io_ops *io)
 
 TDB_EXPORT tdb *tdb_init(void)
 {
-    return calloc(1, sizeof(tdb));
+    tdb *db = calloc(1, sizeof(tdb));
+    external_init(db);
+    return db;
 }
 
 TDB_EXPORT tdb_error tdb_open(tdb *db, const char *orig_root)
@@ -663,6 +665,18 @@ TDB_EXPORT const char *tdb_error_str(tdb_error errcode)
             return "TDB_ERR_TRAIL_TOO_LONG";
         case        TDB_ERR_ONLY_DIFF_FILTER:
             return "TDB_ERR_ONLY_DIFF_FILTER";
+        case        TDB_ERR_EXT_FAILED:
+            return "TDB_ERR_EXT_FAILED";
+        case        TDB_ERR_EXT_CONNECT_FAILED:
+            return "TDB_ERR_EXT_CONNECT_FAILED";
+        case        TDB_ERR_EXT_CONNECT_TIMEOUT:
+            return "TDB_ERR_EXT_CONNECT_TIMEOUT";
+        case        TDB_ERR_EXT_PATH_TOO_LONG:
+            return "TDB_ERR_EXT_PATH_TOO_LONG";
+        case        TDB_ERR_EXT_INVALID_RESPONSE:
+            return "TDB_ERR_EXT_INVALID_RESPONSE";
+        case        TDB_ERR_EXT_SERVER_FAILURE:
+            return "TDB_ERR_EXT_SERVER_FAILURE";
         default:
             return "Unknown error";
     }
@@ -720,6 +734,20 @@ TDB_EXPORT tdb_error tdb_set_opt(tdb *db,
                 return 0;
             }else
                 return TDB_ERR_INVALID_OPTION_VALUE;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-qual"
+        case TDB_OPT_EXTERNAL_HOST:
+            free((char*)db->external_host);
+            db->external_host = strdup(value.ptr);
+            return 0;
+        case TDB_OPT_EXTERNAL_PORT:
+            free((char*)db->external_port);
+            db->external_port = strdup(value.ptr);
+            return 0;
+#pragma GCC diagnostic pop
+        case TDB_OPT_EXTERNAL_TIMEOUT:
+            db->external_timeout = (int)value.value;
+            return 0;
         default:
             return TDB_ERR_UNKNOWN_OPTION;
     }
@@ -738,6 +766,15 @@ TDB_EXPORT tdb_error tdb_get_opt(tdb *db,
             return 0;
         case TDB_OPT_CURSOR_EVENT_BUFFER_SIZE:
             value->value = db->opt_cursor_event_buffer_size;
+            return 0;
+        case TDB_OPT_EXTERNAL_HOST:
+            value->ptr = db->external_host;
+            return 0;
+        case TDB_OPT_EXTERNAL_PORT:
+            value->ptr = db->external_port;
+            return 0;
+        case TDB_OPT_EXTERNAL_TIMEOUT:
+            value->value = db->external_timeout;
             return 0;
         default:
             return TDB_ERR_UNKNOWN_OPTION;

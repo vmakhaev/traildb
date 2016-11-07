@@ -105,6 +105,11 @@ typedef enum{
     TDB_OPT_EVENT_FILTER = 101,
     TDB_OPT_CURSOR_EVENT_BUFFER_SIZE = 102,
 
+    /* tdb_external */
+    TDB_OPT_EXTERNAL_HOST = 201,
+    TDB_OPT_EXTERNAL_PORT = 202,
+    TDB_OPT_EXTERNAL_TIMEOUT = 203,
+
     /* writing */
     TDB_OPT_CONS_OUTPUT_FORMAT = 1001
 

@@ -13,12 +13,14 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <sys/epoll.h>
+#include <netinet/tcp.h>
+
+#include <tdb_external_packet.h>
 
 #define MAX_CONN 5
 #define MAX_EPOLL_EVENTS 64
 
 #define MESSAGE_TIMEOUT 50
-#define MAX_PATH_LEN 1024
 
 #define DEBUG_MSG(fmt, ...) {\
     if (verbose)\
@@ -33,28 +35,6 @@
         fprintf(stderr, fmt, ##__VA_ARGS__);\
     }\
 }
-
-#define REQUEST_HEAD_SIZE 28
-struct tdb_ext_request{
-    char type[4];
-    uint64_t offset;
-    uint64_t min_size;
-    uint32_t root_len;
-    uint32_t fname_len;
-
-    char *root;
-    char *fname;
-} __attribute__((packed));
-
-#define REPLY_HEAD_SIZE 24
-struct tdb_ext_reply{
-    char type[4];
-    uint64_t offset;
-    uint64_t max_size;
-    uint32_t path_len;
-
-    const char *path;
-} __attribute__((packed));
 
 static void die(char *fmt, ...)
 {
@@ -100,7 +80,7 @@ static const char *get_addr(int fd, int *port)
     socklen_t addr_len = sizeof(struct sockaddr_storage);
 
     if (getpeername(fd, (struct sockaddr*)&addr, &addr_len))
-        die("Getpeerame failed\n");
+        die("Getpeername failed\n");
     if (!inet_ntop(AF_INET, &in->sin_addr, buffer, sizeof(buffer)))
         die("Formatting peer address failed\n");
 
@@ -139,9 +119,9 @@ static void wait_socket(int fd, int is_write)
     tv.tv_sec = 0;
     tv.tv_nsec = 10000000; /* 10ms */
     if (is_write)
-        ret = pselect(1, NULL, &fds, NULL, &tv, NULL);
+        ret = pselect(fd + 1, NULL, &fds, NULL, &tv, NULL);
     else
-        ret = pselect(1, &fds, NULL, NULL, &tv, NULL);
+        ret = pselect(fd + 1, &fds, NULL, NULL, &tv, NULL);
     if (ret  == -1)
         die("Waiting on socket failed\n");
 }
@@ -166,16 +146,37 @@ static int receive_bytes(int fd, char *buf, uint32_t num_bytes)
     return 0;
 }
 
+static int send_bytes(int fd, const char *buf, uint32_t num_bytes)
+{
+    uint64_t start = now();
+    int n, i = 0;
+    printf("SEND %u bytes\n", num_bytes);
+    while (i < num_bytes){
+        if (now() - start > MESSAGE_TIMEOUT)
+            return -2;
+        if ((n = send(fd, &buf[i], num_bytes - i, MSG_DONTWAIT)) < 1){
+            if (n == -1 && errno == EAGAIN){
+                wait_socket(fd, 1);
+                continue;
+            }else
+                return -1;
+        }else
+            i += n;
+    }
+    return 0;
+}
+
 static int receive_request(int fd, struct tdb_ext_request *req)
 {
-    static char root[MAX_PATH_LEN];
-    static char fname[MAX_PATH_LEN];
+    static char root[TDB_EXT_MAX_PATH_LEN];
+    static char fname[TDB_EXT_MAX_PATH_LEN];
     int ret;
 
-    if ((ret = receive_bytes(fd, (char*)req, REQUEST_HEAD_SIZE)))
+    if ((ret = receive_bytes(fd, (char*)req, TDB_EXT_REQUEST_HEAD_SIZE)))
         return ret;
 
-    if (!(req->root_len < MAX_PATH_LEN && req->fname_len < MAX_PATH_LEN))
+    if (!(req->root_len < TDB_EXT_MAX_PATH_LEN &&
+          req->fname_len < TDB_EXT_MAX_PATH_LEN))
         return -3;
 
     if ((ret = receive_bytes(fd, root, req->root_len)))
@@ -189,6 +190,22 @@ static int receive_request(int fd, struct tdb_ext_request *req)
     return 0;
 }
 
+static int send_response(int fd,
+                         uint64_t offset,
+                         uint64_t max_size,
+                         const char *path)
+{
+    struct tdb_ext_response resp;
+    memcpy(resp.type, "OKOK", 4);
+    resp.offset = offset;
+    resp.max_size = max_size;
+    resp.path_len = strlen(path);
+    memcpy(resp.path, path, resp.path_len);
+    return send_bytes(fd,
+                      (const char*)&resp,
+                      TDB_EXT_RESPONSE_HEAD_SIZE + resp.path_len);
+}
+
 static int handle_request(int fd, const struct tdb_ext_request *req)
 {
     printf("Got message %.4s root %.*s fname %.*s\n",
@@ -197,11 +214,12 @@ static int handle_request(int fd, const struct tdb_ext_request *req)
            req->root,
            req->fname_len,
            req->fname);
-    if (!memcmp(req->type, "V000", 4))
+    if (!memcmp(req->type, "V000", 4)){
+        send_response(fd, 0, 0, "");
         return 0;
-    if (!memcmp(req->type, "READ", 4))
+    }else if (!memcmp(req->type, "READ", 4))
         return 0;
-    if (!memcmp(req->type, "DONE", 4))
+    else if (!memcmp(req->type, "EXIT", 4))
         return 1;
     else
         return -1;
@@ -233,10 +251,14 @@ static void server(int port, int verbose)
             /* new connection */
             }else if ((ev & EPOLLIN) && fd == server_sock){
                 struct sockaddr_in addr;
+                int one = 1;
                 socklen_t len = sizeof(struct sockaddr_in);
                 if ((fd = accept(fd, (struct sockaddr*)&addr, &len)) < 0)
                     die("Accepting a new connection failed\n");
                 PEER_MSG("New connection\n");
+
+                if (setsockopt(fd, SOL_TCP, TCP_NODELAY, &one, sizeof(one)))
+                    die("Setsockopt TCP_NODELAY failed\n");
                 add_to_epoll(efd, fd);
 
             /* new message */

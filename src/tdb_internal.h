@@ -142,6 +142,11 @@ struct _tdb {
 
 #ifdef TDB_EXTERNAL
     /* tdb_external */
+    const char *external_host;
+    const char *external_port;
+    int external_timeout;
+    int external_conn;
+
     int external_uffd;
     Pvoid_t external_regions;
     pthread_t external_pagefault_thread;

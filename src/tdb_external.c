@@ -19,8 +19,14 @@
 #include <poll.h>
 #include <errno.h>
 
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <netinet/tcp.h>
+
 #include "tdb_package.h"
 #include "tdb_external.h"
+#include "tdb_external_packet.h"
 
 #undef JUDYERROR
 #define JUDYERROR(CallerFile, CallerLine, JudyFunc, JudyErrno, JudyErrID) \
@@ -30,6 +36,12 @@
 }
 
 #include <Judy.h>
+
+#define DEFAULT_HOST "localhost"
+#define DEFAULT_PORT "9009"
+#define DEFAULT_TIMEOUT 0
+
+#define MESSAGE_TIMEOUT 10 /* seconds */
 
 static void warn(char *fmt, ...)
 {
@@ -165,6 +177,203 @@ static void *pagefault_thread(void *arg)
     return NULL;
 }
 
+static tdb_error try_connect(tdb *db)
+{
+    struct addrinfo hints, *res;
+    int ret, sock;
+
+    fd_set fds;
+    struct timespec tv;
+
+    memset(&hints, 0, sizeof(hints));
+    /* force ipv4 for now */
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+
+    if ((ret = getaddrinfo(db->external_host,
+                           db->external_port,
+                           &hints,
+                           &res))){
+        warn("tdb_external: getaddrinfo failed (%s)\n", gai_strerror(ret));
+        return TDB_ERR_EXT_CONNECT_FAILED;
+    }
+    if ((sock = socket(res->ai_family,
+                       res->ai_socktype | SOCK_NONBLOCK,
+                       res->ai_protocol)) == -1){
+        warn("tdb_external: creating a socket failed (%s)\n", strerror(errno));
+        return TDB_ERR_EXT_CONNECT_FAILED;
+    }
+    if ((ret = connect(sock, res->ai_addr, res->ai_addrlen)) &&
+         errno != EINPROGRESS){
+        warn("tdb_external: connect failed (%s)\n", strerror(errno));
+        return TDB_ERR_EXT_CONNECT_FAILED;
+    }
+    ret = 1;
+    if (setsockopt(sock, SOL_TCP, TCP_NODELAY, &ret, sizeof(ret))){
+        warn("tdb_external: setting TCP_NODELAY failed (%s)\n",
+             strerror(errno));
+        return TDB_ERR_EXT_CONNECT_FAILED;
+    }
+
+    FD_ZERO(&fds);
+    FD_SET(sock, &fds);
+
+    if (db->external_timeout > 0){
+        tv.tv_sec = db->external_timeout / 1000;
+        tv.tv_nsec = (db->external_timeout % 1000) * 1000;
+        ret = pselect(sock + 1, NULL, &fds, NULL, &tv, NULL);
+    }else{
+        while (1){
+            tv.tv_sec = 10;
+            tv.tv_nsec = 0;
+            if ((ret = pselect(sock + 1, NULL, &fds, NULL, &tv, NULL)))
+                break;
+            else
+                warn("tdb_external: still trying to connect to %s:%s\n",
+                     db->external_host,
+                     db->external_port);
+        }
+    }
+    switch (ret){
+        case -1:
+            warn("tdb_external: select failed (%s)\n", strerror(errno));
+            return TDB_ERR_EXT_CONNECT_FAILED;
+        case 0:
+            return TDB_ERR_EXT_CONNECT_TIMEOUT;
+        case 1:
+            db->external_conn = sock;
+            return 0;
+    }
+}
+
+static tdb_error receive_bytes(int fd, char *ptr, uint64_t size)
+{
+    uint64_t i = 0;
+    fd_set fds;
+    struct timespec tv;
+
+    FD_ZERO(&fds);
+    FD_SET(fd, &fds);
+
+    while (i < size){
+        ssize_t n;
+        tv.tv_sec = MESSAGE_TIMEOUT;
+        tv.tv_nsec = 0;
+
+        if (pselect(fd + 1, &fds, NULL, NULL, &tv, NULL) != 1){
+            shutdown(fd, SHUT_RDWR);
+            close(fd);
+            return TDB_ERR_EXT_INVALID_RESPONSE;
+        }
+        n = recv(fd, &ptr[i], size - i, 0);
+        if (n < 1){
+            shutdown(fd, SHUT_RDWR);
+            close(fd);
+            return TDB_ERR_EXT_INVALID_RESPONSE;
+        }
+        i += (uint64_t)n;
+    }
+    return 0;
+}
+
+static tdb_error receive_response(tdb *db, struct tdb_ext_response *resp)
+{
+    char *ptr = (char*)resp;
+    tdb_error err;
+
+    memset(resp->path, 0, sizeof(resp->path));
+
+    printf("CP 1\n");
+    if ((err = receive_bytes(db->external_conn,
+                             ptr,
+                             TDB_EXT_RESPONSE_HEAD_SIZE)))
+        return err;
+    printf("CP 2\n");
+    if (memcmp(resp->type, "OKOK", 4)){
+        shutdown(db->external_conn, SHUT_RDWR);
+        close(db->external_conn);
+        return TDB_ERR_EXT_SERVER_FAILURE;
+    }
+
+    return receive_bytes(db->external_conn,
+                         &ptr[TDB_EXT_RESPONSE_HEAD_SIZE],
+                         resp->path_len);
+}
+
+
+static tdb_error ext_request(tdb *db,
+                             const char *type,
+                             uint64_t offset,
+                             uint64_t min_size,
+                             const char *root,
+                             const char *fname,
+                             struct tdb_ext_response *resp)
+{
+    char buffer[TDB_EXT_MAX_PATH_LEN * 2 + TDB_EXT_REQUEST_HEAD_SIZE];
+    struct tdb_ext_request req = {.offset = offset, .min_size = min_size};
+    uint64_t size = 0;
+    uint64_t i = 0;
+    uint64_t num_reconn = 0;
+    tdb_error err;
+
+    memcpy(req.type, type, 4);
+    req.root_len = (uint32_t)strlen(root);
+    req.fname_len = (uint32_t)strlen(fname);
+
+    if (!(req.root_len < TDB_EXT_MAX_PATH_LEN &&
+          req.fname_len < TDB_EXT_MAX_PATH_LEN))
+        return TDB_ERR_EXT_PATH_TOO_LONG;
+
+    memcpy(buffer, &req, TDB_EXT_REQUEST_HEAD_SIZE);
+    size += TDB_EXT_REQUEST_HEAD_SIZE;
+    memcpy(&buffer[size], root, req.root_len);
+    size += req.root_len;
+    memcpy(&buffer[size], fname, req.fname_len);
+
+    while (i < size){
+        ssize_t n;
+        fd_set fds;
+        struct timespec tv;
+
+        FD_ZERO(&fds);
+        FD_SET(db->external_conn, &fds);
+
+        tv.tv_sec = MESSAGE_TIMEOUT;
+        tv.tv_nsec = 0;
+
+        if (pselect(db->external_conn + 1, NULL, &fds, NULL, &tv, NULL) != 1){
+            shutdown(db->external_conn, SHUT_RDWR);
+            close(db->external_conn);
+            if ((err = try_connect(db)))
+                return err;
+        }
+        n = send(db->external_conn, &buffer[i], size - i, 0);
+        if (n < 1){
+            shutdown(db->external_conn, SHUT_RDWR);
+            close(db->external_conn);
+        }else
+            i += (uint64_t)n;
+    }
+    return receive_response(db, resp);
+}
+
+static tdb_error ext_request_simple(tdb *db, const char *type)
+{
+    struct tdb_ext_response resp;
+    return ext_request(db, type, 0, 0, "", "", &resp);
+}
+
+void external_init(tdb *db)
+{
+    tdb_opt_value val;
+    val.ptr = DEFAULT_HOST;
+    tdb_set_opt(db, TDB_OPT_EXTERNAL_HOST, val);
+    val.ptr = DEFAULT_PORT;
+    tdb_set_opt(db, TDB_OPT_EXTERNAL_PORT, val);
+    val.value = (uint64_t)DEFAULT_TIMEOUT;
+    tdb_set_opt(db, TDB_OPT_EXTERNAL_TIMEOUT, val);
+}
+
 tdb_error open_external(tdb *db, const char *root)
 {
     const uint64_t PAGESIZE = (uint64_t)getpagesize();
@@ -182,21 +391,27 @@ tdb_error open_external(tdb *db, const char *root)
     db->external_uffd = syscall(__NR_userfaultfd, O_CLOEXEC | O_NONBLOCK);
 #pragma GCC diagnostic pop
     if (db->external_uffd == -1)
-        return TDB_ERR_IO_READ; /* FIXME */
+        return TDB_ERR_EXT_FAILED;
 
     uffdio_api.api = UFFD_API;
     uffdio_api.features = 0;
     if (ioctl(db->external_uffd, UFFDIO_API, &uffdio_api) == -1)
-        return TDB_ERR_IO_READ; /* FIXME */
+        return TDB_ERR_EXT_FAILED;
 
     if (uffdio_api.api != UFFD_API)
-        return TDB_ERR_IO_READ; /* FIXME */
+        return TDB_ERR_EXT_FAILED;
+
+    /* handshake with the external server */
+    if ((err = try_connect(db)))
+        return err;
+    if ((err = ext_request_simple(db, TDB_EXT_LATEST_VERSION)))
+        return err;
 
     if (pthread_create(&db->external_pagefault_thread,
                        NULL,
                        pagefault_thread,
                        db))
-        return TDB_ERR_IO_READ; /* FIXME */
+        return TDB_ERR_EXT_FAILED;
 
     return 0;
 }
@@ -206,6 +421,17 @@ void free_external(tdb *db)
     Word_t tmp = 0;
     Word_t *ptr;
     int ret;
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-qual"
+    free((char*)db->external_host);
+    free((char*)db->external_port);
+#pragma GCC diagnostic pop
+
+    if (db->external_conn){
+        ext_request_simple(db, "EXIT");
+        close(db->external_conn);
+    }
 
     JLF(ptr, db->external_regions, tmp);
     while (ptr){
