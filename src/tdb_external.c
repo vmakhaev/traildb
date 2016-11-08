@@ -16,7 +16,8 @@
 
 #define DEFAULT_HOST "localhost"
 #define DEFAULT_PORT "9009"
-#define DEFAULT_TIMEOUT 0
+#define DEFAULT_CONNECT_TIMEOUT 60000
+#define DEFAULT_RETRY_TIMEOUT 0
 
 /* assume that most package TOCs fit in this space */
 #define INITIAL_HEAD_SIZE 65000
@@ -120,13 +121,18 @@ void external_init(tdb *db)
     tdb_set_opt(db, TDB_OPT_EXTERNAL_HOST, val);
     val.ptr = DEFAULT_PORT;
     tdb_set_opt(db, TDB_OPT_EXTERNAL_PORT, val);
-    val.value = (uint64_t)DEFAULT_TIMEOUT;
-    tdb_set_opt(db, TDB_OPT_EXTERNAL_TIMEOUT, val);
+    val.value = (uint64_t)DEFAULT_CONNECT_TIMEOUT;
+    tdb_set_opt(db, TDB_OPT_EXTERNAL_CONNECT_TIMEOUT, val);
+    val.value = (uint64_t)DEFAULT_RETRY_TIMEOUT;
+    tdb_set_opt(db, TDB_OPT_EXTERNAL_RETRY_TIMEOUT, val);
 }
 
 tdb_error open_external(tdb *db, const char *root)
 {
     tdb_error err;
+
+    if (!(db->root = strdup(root)))
+        return TDB_ERR_NOMEM;
 
     /* initialize page fault handler */
     if ((err = ext_fault_init(db)))
@@ -149,6 +155,10 @@ tdb_error open_external(tdb *db, const char *root)
 
 void free_external(tdb *db)
 {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-qual"
+    free((char*)db->root);
+#pragma GCC diagnostic pop
     ext_fault_free(db);
     ext_comm_free(db);
     free_package(db);
@@ -190,9 +200,6 @@ int external_mmap(const char *fname,
     but this is faster.
     */
     if (package_toc_get(db, fname, &dst->src_offset, &dst->size))
-        return -1;
-
-    if (!(dst->fname = strdup(fname)))
         return -1;
 
 #pragma GCC diagnostic push

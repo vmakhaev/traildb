@@ -99,10 +99,11 @@ struct tdb_file {
 
 #ifdef TDB_EXTERNAL
     uint64_t src_offset;
-    const char *fname;
-    const char *cached_data;
     uint64_t cached_first_page;
+    const char *cached_ptr;
+    const char *cached_data;
     uint64_t cached_size;
+    uint64_t cached_mmap_size;
 #endif
 };
 
@@ -143,9 +144,11 @@ struct _tdb {
 
 #ifdef TDB_EXTERNAL
     /* tdb_external */
+    const char *root;
     const char *external_host;
     const char *external_port;
-    int external_timeout;
+    uint64_t external_connect_timeout;
+    uint64_t external_retry_timeout;
     int external_conn;
 
     int external_uffd;

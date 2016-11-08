@@ -747,8 +747,11 @@ TDB_EXPORT tdb_error tdb_set_opt(tdb *db,
             db->external_port = strdup(value.ptr);
             return 0;
 #pragma GCC diagnostic pop
-        case TDB_OPT_EXTERNAL_TIMEOUT:
-            db->external_timeout = (int)value.value;
+        case TDB_OPT_EXTERNAL_CONNECT_TIMEOUT:
+            db->external_connect_timeout = value.value;
+            return 0;
+        case TDB_OPT_EXTERNAL_RETRY_TIMEOUT:
+            db->external_retry_timeout = value.value;
             return 0;
         default:
             return TDB_ERR_UNKNOWN_OPTION;
@@ -775,8 +778,11 @@ TDB_EXPORT tdb_error tdb_get_opt(tdb *db,
         case TDB_OPT_EXTERNAL_PORT:
             value->ptr = db->external_port;
             return 0;
-        case TDB_OPT_EXTERNAL_TIMEOUT:
-            value->value = (uint64_t)db->external_timeout;
+        case TDB_OPT_EXTERNAL_CONNECT_TIMEOUT:
+            value->value = db->external_connect_timeout;
+            return 0;
+        case TDB_OPT_EXTERNAL_RETRY_TIMEOUT:
+            value->value = db->external_retry_timeout;
             return 0;
         default:
             return TDB_ERR_UNKNOWN_OPTION;

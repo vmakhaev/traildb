@@ -9,6 +9,7 @@
 #include <time.h>
 #include <errno.h>
 
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -207,6 +208,20 @@ static int send_response(int fd,
                       TDB_EXT_RESPONSE_HEAD_SIZE + resp.path_len);
 }
 
+static int serve_block(int fd, const struct tdb_ext_request *req)
+{
+    struct stat stats;
+
+    if (stat(req->root, &stats))
+        return -1;
+    if (req->offset > stats.st_size)
+        return -1;
+    return send_response(fd,
+                         req->offset,
+                         stats.st_size - req->offset,
+                         req->root);
+}
+
 static int handle_request(int fd, const struct tdb_ext_request *req)
 {
     printf("Got message %.4s root %.*s fname %.*s offset %lu size %lu\n",
@@ -218,11 +233,9 @@ static int handle_request(int fd, const struct tdb_ext_request *req)
            req->offset,
            req->min_size);
     if (!memcmp(req->type, "V000", 4)){
-        send_response(fd, 0, 0, "");
-        return 0;
+        return send_response(fd, 0, 0, "");
     }else if (!memcmp(req->type, "READ", 4)){
-        send_response(fd, req->offset, req->min_size, req->root);
-        return 0;
+        return serve_block(fd, req);
     }else if (!memcmp(req->type, "EXIT", 4))
         return 1;
     else

@@ -64,9 +64,10 @@ tdb_error ext_comm_connect(tdb *db)
     FD_ZERO(&fds);
     FD_SET(sock, &fds);
 
-    if (db->external_timeout > 0){
-        tv.tv_sec = db->external_timeout / 1000;
-        tv.tv_nsec = (db->external_timeout % 1000) * 1000;
+    if (db->external_connect_timeout > 0){
+        long ms = (long)db->external_connect_timeout;
+        tv.tv_sec = ms / 1000L;
+        tv.tv_nsec = (ms % 1000L) * 1000L;
         ret = pselect(sock + 1, NULL, &fds, NULL, &tv, NULL);
     }else{
         while (1){

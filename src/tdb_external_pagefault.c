@@ -20,7 +20,6 @@
 #include <poll.h>
 
 #include "tdb_external_priv.h"
-#include "tdb_package.h"
 
 #undef JUDYERROR
 #define JUDYERROR(CallerFile, CallerLine, JudyFunc, JudyErrno, JudyErrID) \
@@ -31,37 +30,118 @@
 
 #include <Judy.h>
 
+#define MAX_EXP_BACKOFF_POWER 9 /* wait at most 2^9 ~= 8mins between retries */
+
+static uint32_t PAGESIZE;
+
 static void free_cache(struct tdb_file *region)
 {
-    if (region->cached_data)
+    if (region->cached_ptr){
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wcast-qual"
-        if (munmap((char*)region->cached_data, region->cached_size))
+        int r;
+        if ((r = munmap((char*)region->cached_ptr, region->cached_mmap_size)))
+            ext_die("tdb_external: munmap(cached_data) failed: %s\n",
+                    strerror(errno));
 #pragma GCC diagnostic pop
-            1; /* FIXME - this just doesn't like package_mmap */
-            //die("tdb_external: munmap(cached_data failed (errno %d)", errno);
+        region->cached_ptr = NULL;
+    }
+}
 
+static uint64_t now(void)
+{
+    struct timespec tstamp;
+    if (clock_gettime(CLOCK_MONOTONIC_COARSE, &tstamp))
+        ext_die("clock_gettime failed\n");
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wsign-conversion"
+    return tstamp.tv_sec * 1000LU + tstamp.tv_nsec / 1000000LU;
+#pragma GCC diagnostic pop
+}
+
+/*
+Interestingly this function must not fail. There's nothing clever we can do
+if we can't handle a page fault. We could segfault or SIGBUS.
+*/
+static void request_external_page(tdb *db,
+                                  uint64_t offset,
+                                  struct tdb_ext_response *resp)
+{
+    tdb_error err;
+    uint64_t start = now();
+    uint64_t num_retries = 0;
+
+    while ((err = ext_comm_request(db,
+                                   "READ",
+                                   offset,
+                                   PAGESIZE,
+                                   db->root,
+                                   "",
+                                   resp))){
+
+        if (db->external_retry_timeout > 0 &&
+            now() - start > db->external_retry_timeout)
+            ext_die("FATAL! "
+                    "Requesting a page for %s at %lu timed out (error %s)!\n",
+                    db->root,
+                    offset,
+                    tdb_error_str(err));
+
+        /* exponential backoff */
+        if (num_retries < MAX_EXP_BACKOFF_POWER)
+            ++num_retries;
+        sleep(1U << num_retries);
+    }
 }
 
 static void populate_cache(tdb *db, struct tdb_file *region, uint64_t requested_page)
 {
-    struct tdb_file src_region;
-    int ret;
+    struct tdb_ext_response resp;
+    uint64_t ext_offset = region->src_offset + requested_page * PAGESIZE;
+    uint64_t shift;
+    int fd;
 
     free_cache(region);
-    if ((ret = package_mmap(region->fname, NULL, &src_region, db)))
-        ext_die("package_mmap failed %d\n", ret);
+    request_external_page(db, ext_offset, &resp);
 
-    region->cached_data = src_region.data;
-    region->cached_first_page = 0;
-    region->cached_size = src_region.size;
+    if ((fd = open(resp.path, O_RDONLY)) == -1)
+        ext_die("Could not open a block at %s (requested %s at %lu): %s\n",
+                resp.path,
+                db->root,
+                ext_offset,
+                strerror(errno));
+
+    /*
+    memory map the section of the block that contains the page requested
+    and pages after that up to resp->max_size as a lookahead cache
+    */
+    shift = resp.offset & ((uint64_t)(PAGESIZE - 1));
+    resp.offset -= shift;
+
+    region->cached_mmap_size = resp.max_size + shift;
+    region->cached_ptr = mmap(NULL,
+                              region->cached_mmap_size,
+                              PROT_READ,
+                              MAP_SHARED,
+                              fd,
+                              (off_t)resp.offset);
+
+    if (region->cached_ptr == MAP_FAILED)
+        ext_die("Could not mmap a block at %s (offset %lu size %lu)\n",
+                resp.path,
+                resp.offset,
+                region->cached_mmap_size);
+
+    region->cached_data = &region->cached_ptr[shift];
+    region->cached_first_page = requested_page;
+    region->cached_size = resp.max_size;
+    close(fd);
 }
 
 static void handle_pagefault(tdb *db, uint64_t addr)
 {
     struct tdb_file *region = NULL;
     struct uffdio_copy copy;
-    const uint64_t PAGESIZE = (uint64_t)getpagesize();
     uint64_t requested_page, offs;
     Word_t region_start = addr;
     Word_t *ptr;
@@ -94,8 +174,9 @@ static void handle_pagefault(tdb *db, uint64_t addr)
 
     if (ioctl(db->external_uffd, UFFDIO_COPY, &copy) == -1)
         ext_die("tdb_external: "
-                "UFFDIO_COPY failed (errno %d): file %s, requested page %lu",
-                errno, region->fname, requested_page);
+                "UFFDIO_COPY failed (errno %d): "
+                "offset %lu, requested page %lu\n",
+                errno, region->src_offset, requested_page);
     return;
 out_of_memory:
     ext_die("tdb_external: assert failed - JLL out of memory\n");
@@ -158,8 +239,11 @@ int ext_fault_mmap(tdb *db, struct tdb_file *dst)
     struct uffdio_register uffdio_register;
     Word_t *ptr;
     uint64_t shift;
-    const uint64_t PAGESIZE = (uint64_t)getpagesize();
 
+    /*
+    mmap_size must be a multiple of PAGESIZE since UFFDIO_COPY can
+    only copy full pages
+    */
     dst->mmap_size = dst->size + (PAGESIZE - (dst->size & (PAGESIZE - 1)));
     dst->data = dst->ptr = mmap(NULL,
                                 dst->mmap_size,
@@ -185,7 +269,7 @@ int ext_fault_mmap(tdb *db, struct tdb_file *dst)
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wcast-qual"
-    /* store range.start -> fname mapping */
+    /* store range.start -> region mapping */
     JLI(ptr, ((tdb*)db)->external_regions, (Word_t)dst->ptr);
     *ptr = (Word_t)dst;
 #pragma GCC diagnostic pop
@@ -199,9 +283,11 @@ err:
 
 tdb_error ext_fault_init(tdb *db)
 {
-    const uint64_t PAGESIZE = (uint64_t)getpagesize();
     struct uffdio_api uffdio_api;
     tdb_error err;
+
+    if (!PAGESIZE)
+        PAGESIZE = (uint32_t)getpagesize();
 
     if (!(db->external_page_buffer = malloc(PAGESIZE)))
         return TDB_ERR_NOMEM;
@@ -242,10 +328,6 @@ void ext_fault_free(tdb *db)
         struct tdb_file *region = (struct tdb_file*)*ptr;
 
         free_cache(region);
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wcast-qual"
-        free((char*)region->fname);
-#pragma GCC diagnostic pop
 
         range.start = (uint64_t)region->ptr;
         range.len = region->mmap_size;
