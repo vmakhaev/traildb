@@ -677,6 +677,8 @@ TDB_EXPORT const char *tdb_error_str(tdb_error errcode)
             return "TDB_ERR_EXT_INVALID_RESPONSE";
         case        TDB_ERR_EXT_SERVER_FAILURE:
             return "TDB_ERR_EXT_SERVER_FAILURE";
+        case        TDB_ERR_EXT_INVALID_HEADER:
+            return "TDB_ERR_EXT_INVALID_HEADER";
         default:
             return "Unknown error";
     }

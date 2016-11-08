@@ -150,7 +150,6 @@ static int send_bytes(int fd, const char *buf, uint32_t num_bytes)
 {
     uint64_t start = now();
     int n, i = 0;
-    printf("SEND %u bytes\n", num_bytes);
     while (i < num_bytes){
         if (now() - start > MESSAGE_TIMEOUT)
             return -2;
@@ -168,8 +167,8 @@ static int send_bytes(int fd, const char *buf, uint32_t num_bytes)
 
 static int receive_request(int fd, struct tdb_ext_request *req)
 {
-    static char root[TDB_EXT_MAX_PATH_LEN];
-    static char fname[TDB_EXT_MAX_PATH_LEN];
+    static char root[TDB_EXT_MAX_PATH_LEN + 1];
+    static char fname[TDB_EXT_MAX_PATH_LEN + 1];
     int ret;
 
     if ((ret = receive_bytes(fd, (char*)req, TDB_EXT_REQUEST_HEAD_SIZE)))
@@ -182,10 +181,12 @@ static int receive_request(int fd, struct tdb_ext_request *req)
     if ((ret = receive_bytes(fd, root, req->root_len)))
         return ret;
     req->root = root;
+    req->root[req->root_len + 1] = 0;
 
     if ((ret = receive_bytes(fd, fname, req->fname_len)))
         return ret;
     req->fname = fname;
+    req->fname[req->fname_len + 1] = 0;
 
     return 0;
 }
@@ -208,18 +209,21 @@ static int send_response(int fd,
 
 static int handle_request(int fd, const struct tdb_ext_request *req)
 {
-    printf("Got message %.4s root %.*s fname %.*s\n",
+    printf("Got message %.4s root %.*s fname %.*s offset %lu size %lu\n",
            req->type,
            req->root_len,
            req->root,
            req->fname_len,
-           req->fname);
+           req->fname,
+           req->offset,
+           req->min_size);
     if (!memcmp(req->type, "V000", 4)){
         send_response(fd, 0, 0, "");
         return 0;
-    }else if (!memcmp(req->type, "READ", 4))
+    }else if (!memcmp(req->type, "READ", 4)){
+        send_response(fd, req->offset, req->min_size, req->root);
         return 0;
-    else if (!memcmp(req->type, "EXIT", 4))
+    }else if (!memcmp(req->type, "EXIT", 4))
         return 1;
     else
         return -1;

@@ -43,6 +43,13 @@
 
 #define MESSAGE_TIMEOUT 10 /* seconds */
 
+/* assume that most package TOCs fit in this space */
+#define INITIAL_HEAD_SIZE 65000
+/* if the TOC is larger, how much larger we should try */
+#define HEAD_SIZE_INCREMENT 1000000
+/* we believe that no sane TOC can be larger than this */
+#define MAX_HEAD_SIZE 10000000
+
 static void warn(char *fmt, ...)
 {
     va_list aptr;
@@ -283,23 +290,20 @@ static tdb_error receive_response(tdb *db, struct tdb_ext_response *resp)
 
     memset(resp->path, 0, sizeof(resp->path));
 
-    printf("CP 1\n");
     if ((err = receive_bytes(db->external_conn,
                              ptr,
                              TDB_EXT_RESPONSE_HEAD_SIZE)))
         return err;
-    printf("CP 2\n");
+
     if (memcmp(resp->type, "OKOK", 4)){
         shutdown(db->external_conn, SHUT_RDWR);
         close(db->external_conn);
         return TDB_ERR_EXT_SERVER_FAILURE;
     }
-
     return receive_bytes(db->external_conn,
                          &ptr[TDB_EXT_RESPONSE_HEAD_SIZE],
                          resp->path_len);
 }
-
 
 static tdb_error ext_request(tdb *db,
                              const char *type,
@@ -363,6 +367,66 @@ static tdb_error ext_request_simple(tdb *db, const char *type)
     return ext_request(db, type, 0, 0, "", "", &resp);
 }
 
+static int is_invalid_header(const struct tdb_ext_response *resp)
+{
+    FILE *f;
+    tdb_error ret = TDB_ERR_IO_TRUNCATE;
+    char *p = NULL;
+    uint64_t offset;
+
+    /* NOTE: if the request offset=0 the return offset must be 0 too */
+    if (resp->offset)
+        return TDB_ERR_EXT_SERVER_FAILURE;
+    if (resp->max_size < TOC_FILE_OFFSET)
+        return TDB_ERR_EXT_INVALID_HEADER;
+
+    /*
+    We need to read the whole TOC file. The file ends with a double
+    newline. Once we find it, we know that we have got the full file.
+    */
+    TDB_OPEN(f, resp->path, "r");
+    p = mmap(NULL, resp->max_size, PROT_READ, MAP_SHARED, fileno(f), 0);
+    fclose(f);
+    if (p == MAP_FAILED)
+        return TDB_ERR_IO_READ;
+
+    for (offset = TOC_FILE_OFFSET; offset < resp->max_size - 1; offset++){
+        if (p[offset] == '\n' && p[offset + 1] == '\n'){
+            ret = 0;
+            break;
+        }
+    }
+done:
+    if (p)
+        munmap(p, resp->max_size);
+    return ret;
+}
+
+static tdb_error open_package_header(tdb *db, const char *root)
+{
+    struct tdb_ext_response resp;
+    tdb_error err;
+    uint64_t head_size = INITIAL_HEAD_SIZE;
+
+    while (1){
+        if ((err = ext_request(db, "READ", 0, head_size, root, "", &resp)))
+            return err;
+
+        head_size += HEAD_SIZE_INCREMENT;
+        if (head_size > MAX_HEAD_SIZE)
+            return TDB_ERR_EXT_INVALID_HEADER;
+
+        err = is_invalid_header(&resp);
+        if (err == TDB_ERR_IO_TRUNCATE)
+            continue;
+        else if (err)
+            return err;
+        else
+            break;
+    }
+    return open_package(db, resp.path);
+}
+
 void external_init(tdb *db)
 {
     tdb_opt_value val;
@@ -379,9 +443,6 @@ tdb_error open_external(tdb *db, const char *root)
     const uint64_t PAGESIZE = (uint64_t)getpagesize();
     struct uffdio_api uffdio_api;
     tdb_error err;
-
-    if ((err = open_package(db, root)))
-        return err;
 
     if (!(db->external_page_buffer = malloc(PAGESIZE)))
         return TDB_ERR_NOMEM;
@@ -405,6 +466,9 @@ tdb_error open_external(tdb *db, const char *root)
     if ((err = try_connect(db)))
         return err;
     if ((err = ext_request_simple(db, TDB_EXT_LATEST_VERSION)))
+        return err;
+    /* fetch the package header and parse the TOC */
+    if ((err = open_package_header(db, root)))
         return err;
 
     if (pthread_create(&db->external_pagefault_thread,
