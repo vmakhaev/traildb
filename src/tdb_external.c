@@ -408,6 +408,13 @@ static tdb_error open_package_header(tdb *db, const char *root)
     tdb_error err;
     uint64_t head_size = INITIAL_HEAD_SIZE;
 
+    /*
+    We don't know the exact size of the package TOC, so we
+    start by requesting a chunk of data based on an educated guess,
+    INITIAL_HEAD_SIZE. If the full TOC isn't contained in this chunk,
+    we keep requesting a larger chunk, incremented by HEAD_SIZE_INCREMENT,
+    until we have found the full TOC.
+    */
     while (1){
         if ((err = ext_request(db, "READ", 0, head_size, root, "", &resp)))
             return err;
@@ -424,6 +431,10 @@ static tdb_error open_package_header(tdb *db, const char *root)
         else
             break;
     }
+    /*
+    Now we know that we have found a chunk of data that contains the full
+    package header. We can proceed with opening it as usual.
+    */
     return open_package(db, resp.path);
 }
 
@@ -526,12 +537,24 @@ out_of_memory:
 
 FILE *external_fopen(const char *fname, const char *root, const tdb *db)
 {
-    return package_fopen(fname, root, db);
+    struct tdb_ext_response resp;
+    uint64_t offset, size;
+    FILE *f;
+
+    if (package_toc_get(db, fname, &offset, &size))
+        return NULL;
+    if (ext_request(db, "READ", offset, size, root, "", &resp))
+        return NULL;
+    if (!(f = fopen(resp.path, "r")))
+        return NULL;
+    if (fseek(f, (off_t)resp.offset, SEEK_SET) == -1)
+        return NULL;
+    return f;
 }
 
 int external_fclose(FILE *f)
 {
-    return package_fclose(f);
+    return fclose(f);
 }
 
 int external_mmap(const char *fname,
