@@ -776,7 +776,7 @@ TDB_EXPORT tdb_error tdb_get_opt(tdb *db,
             value->ptr = db->external_port;
             return 0;
         case TDB_OPT_EXTERNAL_TIMEOUT:
-            value->value = db->external_timeout;
+            value->value = (uint64_t)db->external_timeout;
             return 0;
         default:
             return TDB_ERR_UNKNOWN_OPTION;

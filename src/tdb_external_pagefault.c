@@ -1,0 +1,267 @@
+
+#define _DEFAULT_SOURCE
+#define _GNU_SOURCE /* POLLRDHUP */
+
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <unistd.h>
+#include <fcntl.h>
+
+#include <sys/mman.h>
+#include <sys/stat.h>
+
+#include <linux/userfaultfd.h>
+#include <sys/syscall.h>
+#include <asm/unistd.h>
+#include <sys/ioctl.h>
+#include <poll.h>
+
+#include "tdb_external_priv.h"
+#include "tdb_package.h"
+
+#undef JUDYERROR
+#define JUDYERROR(CallerFile, CallerLine, JudyFunc, JudyErrno, JudyErrID) \
+{                                                                         \
+   if ((JudyErrno) == JU_ERRNO_NOMEM)                                     \
+       goto out_of_memory;                                                \
+}
+
+#include <Judy.h>
+
+static void free_cache(struct tdb_file *region)
+{
+    if (region->cached_data)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-qual"
+        if (munmap((char*)region->cached_data, region->cached_size))
+#pragma GCC diagnostic pop
+            1; /* FIXME - this just doesn't like package_mmap */
+            //die("tdb_external: munmap(cached_data failed (errno %d)", errno);
+
+}
+
+static void populate_cache(tdb *db, struct tdb_file *region, uint64_t requested_page)
+{
+    struct tdb_file src_region;
+    int ret;
+
+    free_cache(region);
+    if ((ret = package_mmap(region->fname, NULL, &src_region, db)))
+        ext_die("package_mmap failed %d\n", ret);
+
+    region->cached_data = src_region.data;
+    region->cached_first_page = 0;
+    region->cached_size = src_region.size;
+}
+
+static void handle_pagefault(tdb *db, uint64_t addr)
+{
+    struct tdb_file *region = NULL;
+    struct uffdio_copy copy;
+    const uint64_t PAGESIZE = (uint64_t)getpagesize();
+    uint64_t requested_page, offs;
+    Word_t region_start = addr;
+    Word_t *ptr;
+
+    JLL(ptr, db->external_regions, region_start);
+    if (ptr)
+        region = (struct tdb_file*)*ptr;
+    else
+        ext_die("tdb_external: unknown external_region at %lx\n", addr);
+
+    requested_page = (addr - region_start) / PAGESIZE;
+    if (requested_page < region->cached_first_page ||
+        (requested_page + 1) * PAGESIZE >
+         region->cached_first_page * PAGESIZE + region->cached_size)
+        populate_cache(db, region, requested_page);
+
+    offs = (requested_page - region->cached_first_page) * PAGESIZE;
+    if (region->cached_size - offs < PAGESIZE){
+        memset(db->external_page_buffer, 0, PAGESIZE);
+        memcpy(db->external_page_buffer,
+               region->cached_data + offs,
+               region->cached_size - offs);
+        copy.src = (uint64_t)db->external_page_buffer;
+    }else
+        copy.src = (uint64_t)(region->cached_data + offs);
+
+    copy.dst = region_start + requested_page * PAGESIZE;
+    copy.len = PAGESIZE;
+    copy.mode = 0;
+
+    if (ioctl(db->external_uffd, UFFDIO_COPY, &copy) == -1)
+        ext_die("tdb_external: "
+                "UFFDIO_COPY failed (errno %d): file %s, requested page %lu",
+                errno, region->fname, requested_page);
+    return;
+out_of_memory:
+    ext_die("tdb_external: assert failed - JLL out of memory\n");
+}
+
+static void *pagefault_thread(void *arg)
+{
+    tdb *db = (tdb*)arg;
+    struct pollfd pollfd[1];
+
+    pollfd[0].fd = db->external_uffd;
+    pollfd[0].events = POLLIN | POLLRDHUP;
+
+    while (1){
+        struct uffd_msg msg;
+        /*
+        note that we need a short timeout since close() doesn't seem
+        to wake up poll but we notice it at the timeout
+        */
+        int pollres = poll(pollfd, 1, 100);
+        ssize_t len;
+        switch (pollres) {
+            case 0:
+                continue;
+            case 1:
+                break;
+            default:
+                ext_warn("tdb_external: unexpected poll result (%d)\n",
+                         pollres);
+                continue;
+        }
+        if (pollfd[0].revents & POLLNVAL || pollfd[0].revents & POLLRDHUP){
+            break; /* closed */
+        }
+
+        if (pollfd[0].revents & POLLERR){
+            ext_warn("tdb_external: unexpected POLLERR\n");
+            continue;
+        }
+        if ((len = read(db->external_uffd, &msg, sizeof(msg))) == -1){
+            if (errno == EAGAIN)
+                continue;
+            else{
+                ext_warn("tdb_external: read failed (%d)\n", errno);
+                continue;
+            }
+        }
+        if (len != sizeof(msg)) {
+            ext_warn("tdb_external: invalid message size (%d)\n", len);
+            continue;
+        }
+        if (msg.event & UFFD_EVENT_PAGEFAULT)
+            handle_pagefault(db, msg.arg.pagefault.address);
+    }
+    return NULL;
+}
+
+int ext_fault_mmap(tdb *db, struct tdb_file *dst)
+{
+    struct uffdio_register uffdio_register;
+    Word_t *ptr;
+    uint64_t shift;
+    const uint64_t PAGESIZE = (uint64_t)getpagesize();
+
+    dst->mmap_size = dst->size + (PAGESIZE - (dst->size & (PAGESIZE - 1)));
+    dst->data = dst->ptr = mmap(NULL,
+                                dst->mmap_size,
+                                PROT_READ,
+                                MAP_PRIVATE | MAP_ANONYMOUS,
+                                -1,
+                                0);
+
+    if (dst->ptr == MAP_FAILED)
+        return -1;
+
+    /* register the pages in the region for userfault */
+    uffdio_register.range.start = (unsigned long)dst->ptr;
+    uffdio_register.range.len = dst->mmap_size;
+    uffdio_register.mode = UFFDIO_REGISTER_MODE_MISSING;
+
+    if (ioctl(db->external_uffd, UFFDIO_REGISTER, &uffdio_register) == -1)
+        goto err;
+
+    if ((uffdio_register.ioctls & UFFD_API_RANGE_IOCTLS) !=
+            UFFD_API_RANGE_IOCTLS)
+        goto err;
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-qual"
+    /* store range.start -> fname mapping */
+    JLI(ptr, ((tdb*)db)->external_regions, (Word_t)dst->ptr);
+    *ptr = (Word_t)dst;
+#pragma GCC diagnostic pop
+    return 0;
+
+out_of_memory:
+err:
+    munmap(dst->ptr, dst->mmap_size);
+    return -1;
+}
+
+tdb_error ext_fault_init(tdb *db)
+{
+    const uint64_t PAGESIZE = (uint64_t)getpagesize();
+    struct uffdio_api uffdio_api;
+    tdb_error err;
+
+    if (!(db->external_page_buffer = malloc(PAGESIZE)))
+        return TDB_ERR_NOMEM;
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wconversion"
+    db->external_uffd = syscall(__NR_userfaultfd, O_CLOEXEC | O_NONBLOCK);
+#pragma GCC diagnostic pop
+    if (db->external_uffd == -1)
+        return TDB_ERR_EXT_FAILED;
+
+    uffdio_api.api = UFFD_API;
+    uffdio_api.features = 0;
+    if (ioctl(db->external_uffd, UFFDIO_API, &uffdio_api) == -1)
+        return TDB_ERR_EXT_FAILED;
+
+    if (uffdio_api.api != UFFD_API)
+        return TDB_ERR_EXT_FAILED;
+
+    if (pthread_create(&db->external_pagefault_thread,
+                       NULL,
+                       pagefault_thread,
+                       db))
+        return TDB_ERR_EXT_FAILED;
+
+    return 0;
+}
+
+void ext_fault_free(tdb *db)
+{
+    Word_t tmp = 0;
+    Word_t *ptr;
+    int ret;
+
+    JLF(ptr, db->external_regions, tmp);
+    while (ptr){
+        struct uffdio_range range;
+        struct tdb_file *region = (struct tdb_file*)*ptr;
+
+        free_cache(region);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-qual"
+        free((char*)region->fname);
+#pragma GCC diagnostic pop
+
+        range.start = (uint64_t)region->ptr;
+        range.len = region->mmap_size;
+        if (ioctl(db->external_uffd, UFFDIO_UNREGISTER, &range) == -1)
+            ext_die("tdb_external: UFFDIO_UNREGISTER failed %d\n", errno);
+
+        JLN(ptr, db->external_regions, tmp);
+    }
+    free(db->external_page_buffer);
+    if (db->external_uffd)
+        close(db->external_uffd);
+    if (db->external_pagefault_thread)
+        if ((ret = pthread_join(db->external_pagefault_thread, NULL)))
+            ext_die("tdb_external: pthread_join failed (errno %d)\n", ret);
+
+    JLFA(tmp, db->external_regions);
+out_of_memory:
+    return;
+}

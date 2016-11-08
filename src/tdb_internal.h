@@ -98,6 +98,7 @@ struct tdb_file {
     uint64_t mmap_size;
 
 #ifdef TDB_EXTERNAL
+    uint64_t src_offset;
     const char *fname;
     const char *cached_data;
     uint64_t cached_first_page;
