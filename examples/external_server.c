@@ -166,28 +166,19 @@ static int send_bytes(int fd, const char *buf, uint32_t num_bytes)
     return 0;
 }
 
-static int receive_request(int fd, struct tdb_ext_request *req)
+static int receive_request(int fd, struct tdb_ext_packet *req)
 {
-    static char root[TDB_EXT_MAX_PATH_LEN + 1];
-    static char fname[TDB_EXT_MAX_PATH_LEN + 1];
     int ret;
 
-    if ((ret = receive_bytes(fd, (char*)req, TDB_EXT_REQUEST_HEAD_SIZE)))
+    if ((ret = receive_bytes(fd, (char*)req, TDB_EXT_PACKET_HEAD_SIZE)))
         return ret;
 
-    if (!(req->root_len < TDB_EXT_MAX_PATH_LEN &&
-          req->fname_len < TDB_EXT_MAX_PATH_LEN))
+    if (!(req->path_len < TDB_EXT_MAX_PATH_LEN))
         return -3;
 
-    if ((ret = receive_bytes(fd, root, req->root_len)))
+    if ((ret = receive_bytes(fd, req->path, req->path_len)))
         return ret;
-    req->root = root;
-    req->root[req->root_len + 1] = 0;
-
-    if ((ret = receive_bytes(fd, fname, req->fname_len)))
-        return ret;
-    req->fname = fname;
-    req->fname[req->fname_len + 1] = 0;
+    req->path[req->path_len] = 0;
 
     return 0;
 }
@@ -197,41 +188,41 @@ static int send_response(int fd,
                          uint64_t max_size,
                          const char *path)
 {
-    struct tdb_ext_response resp;
+    struct tdb_ext_packet resp;
     memcpy(resp.type, "OKOK", 4);
     resp.offset = offset;
-    resp.max_size = max_size;
+    resp.size = max_size;
     resp.path_len = strlen(path);
     memcpy(resp.path, path, resp.path_len);
     return send_bytes(fd,
                       (const char*)&resp,
-                      TDB_EXT_RESPONSE_HEAD_SIZE + resp.path_len);
+                      TDB_EXT_PACKET_HEAD_SIZE + resp.path_len);
 }
 
-static int serve_block(int fd, const struct tdb_ext_request *req)
+static int serve_block(int fd, const struct tdb_ext_packet *req)
 {
     struct stat stats;
 
-    if (stat(req->root, &stats))
+    if (stat(req->path, &stats))
         return -1;
+
     if (req->offset > stats.st_size)
         return -1;
+
     return send_response(fd,
                          req->offset,
                          stats.st_size - req->offset,
-                         req->root);
+                         req->path);
 }
 
-static int handle_request(int fd, const struct tdb_ext_request *req)
+static int handle_request(int fd, const struct tdb_ext_packet *req)
 {
-    printf("Got message %.4s root %.*s fname %.*s offset %lu size %lu\n",
+    printf("Got message %.4s root %.*s offset %lu size %lu\n",
            req->type,
-           req->root_len,
-           req->root,
-           req->fname_len,
-           req->fname,
+           req->path_len,
+           req->path,
            req->offset,
-           req->min_size);
+           req->size);
     if (!memcmp(req->type, "V000", 4)){
         return send_response(fd, 0, 0, "");
     }else if (!memcmp(req->type, "READ", 4)){
@@ -280,7 +271,7 @@ static void server(int port, int verbose)
 
             /* new message */
             }else if (ev & EPOLLIN){
-                struct tdb_ext_request req;
+                struct tdb_ext_packet req;
                 int ret = receive_request(fd, &req);
                 if (ret){
                     if (ret == -1){

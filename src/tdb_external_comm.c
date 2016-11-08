@@ -123,7 +123,7 @@ static tdb_error receive_bytes(int fd, char *ptr, uint64_t size)
     return 0;
 }
 
-static tdb_error receive_response(tdb *db, struct tdb_ext_response *resp)
+static tdb_error receive_response(tdb *db, struct tdb_ext_packet *resp)
 {
     char *ptr = (char*)resp;
     tdb_error err;
@@ -132,7 +132,7 @@ static tdb_error receive_response(tdb *db, struct tdb_ext_response *resp)
 
     if ((err = receive_bytes(db->external_conn,
                              ptr,
-                             TDB_EXT_RESPONSE_HEAD_SIZE)))
+                             TDB_EXT_PACKET_HEAD_SIZE)))
         return err;
 
     if (memcmp(resp->type, "OKOK", 4)){
@@ -141,7 +141,7 @@ static tdb_error receive_response(tdb *db, struct tdb_ext_response *resp)
         return TDB_ERR_EXT_SERVER_FAILURE;
     }
     return receive_bytes(db->external_conn,
-                         &ptr[TDB_EXT_RESPONSE_HEAD_SIZE],
+                         &ptr[TDB_EXT_PACKET_HEAD_SIZE],
                          resp->path_len);
 }
 
@@ -149,30 +149,22 @@ tdb_error ext_comm_request(tdb *db,
                            const char *type,
                            uint64_t offset,
                            uint64_t min_size,
-                           const char *root,
-                           const char *fname,
-                           struct tdb_ext_response *resp)
+                           struct tdb_ext_packet *resp)
 {
-    char buffer[TDB_EXT_MAX_PATH_LEN * 2 + TDB_EXT_REQUEST_HEAD_SIZE];
-    struct tdb_ext_request req = {.offset = offset, .min_size = min_size};
-    uint64_t size = 0;
+    struct tdb_ext_packet req = {.offset = offset, .size = min_size};
+    const char *buffer = (const char*)&req;
+    uint64_t size, num_reconn = 0;
     uint64_t i = 0;
-    uint64_t num_reconn = 0;
     tdb_error err;
 
     memcpy(req.type, type, 4);
-    req.root_len = (uint32_t)strlen(root);
-    req.fname_len = (uint32_t)strlen(fname);
+    req.path_len = (uint32_t)strlen(db->root);
 
-    if (!(req.root_len < TDB_EXT_MAX_PATH_LEN &&
-          req.fname_len < TDB_EXT_MAX_PATH_LEN))
+    if (req.path_len >= TDB_EXT_MAX_PATH_LEN)
         return TDB_ERR_EXT_PATH_TOO_LONG;
 
-    memcpy(buffer, &req, TDB_EXT_REQUEST_HEAD_SIZE);
-    size += TDB_EXT_REQUEST_HEAD_SIZE;
-    memcpy(&buffer[size], root, req.root_len);
-    size += req.root_len;
-    memcpy(&buffer[size], fname, req.fname_len);
+    memcpy(req.path, db->root, req.path_len);
+    size = req.path_len + TDB_EXT_PACKET_HEAD_SIZE;
 
     while (i < size){
         ssize_t n;
@@ -203,8 +195,8 @@ tdb_error ext_comm_request(tdb *db,
 
 tdb_error ext_comm_request_simple(tdb *db, const char *type)
 {
-    struct tdb_ext_response resp;
-    return ext_comm_request(db, type, 0, 0, "", "", &resp);
+    struct tdb_ext_packet resp;
+    return ext_comm_request(db, type, 0, 0, &resp);
 }
 
 void ext_comm_free(tdb *db)

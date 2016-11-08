@@ -23,9 +23,7 @@ tdb_error ext_comm_request(tdb *db,
                            const char *type,
                            uint64_t offset,
                            uint64_t min_size,
-                           const char *root,
-                           const char *fname,
-                           struct tdb_ext_response *resp);
+                           struct tdb_ext_packet *resp);
 
 tdb_error ext_comm_request_simple(tdb *db, const char *type);
 

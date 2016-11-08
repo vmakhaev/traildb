@@ -65,20 +65,13 @@ if we can't handle a page fault. We could segfault or SIGBUS.
 */
 static void request_external_page(tdb *db,
                                   uint64_t offset,
-                                  struct tdb_ext_response *resp)
+                                  struct tdb_ext_packet *resp)
 {
     tdb_error err;
     uint64_t start = now();
     uint64_t num_retries = 0;
 
-    while ((err = ext_comm_request(db,
-                                   "READ",
-                                   offset,
-                                   PAGESIZE,
-                                   db->root,
-                                   "",
-                                   resp))){
-
+    while ((err = ext_comm_request(db, "READ", offset, PAGESIZE, resp))){
         if (db->external_retry_timeout > 0 &&
             now() - start > db->external_retry_timeout)
             ext_die("FATAL! "
@@ -96,7 +89,7 @@ static void request_external_page(tdb *db,
 
 static void populate_cache(tdb *db, struct tdb_file *region, uint64_t requested_page)
 {
-    struct tdb_ext_response resp;
+    struct tdb_ext_packet resp;
     uint64_t ext_offset = region->src_offset + requested_page * PAGESIZE;
     uint64_t shift;
     int fd;
@@ -118,7 +111,7 @@ static void populate_cache(tdb *db, struct tdb_file *region, uint64_t requested_
     shift = resp.offset & ((uint64_t)(PAGESIZE - 1));
     resp.offset -= shift;
 
-    region->cached_mmap_size = resp.max_size + shift;
+    region->cached_mmap_size = resp.size + shift;
     region->cached_ptr = mmap(NULL,
                               region->cached_mmap_size,
                               PROT_READ,
@@ -134,7 +127,7 @@ static void populate_cache(tdb *db, struct tdb_file *region, uint64_t requested_
 
     region->cached_data = &region->cached_ptr[shift];
     region->cached_first_page = requested_page;
-    region->cached_size = resp.max_size;
+    region->cached_size = resp.size;
     close(fd);
 }
 

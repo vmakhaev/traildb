@@ -43,7 +43,7 @@ void ext_die(char *fmt, ...)
     abort();
 }
 
-static int is_invalid_header(const struct tdb_ext_response *resp)
+static int is_invalid_header(const struct tdb_ext_packet *resp)
 {
     FILE *f;
     tdb_error ret = TDB_ERR_IO_TRUNCATE;
@@ -53,7 +53,7 @@ static int is_invalid_header(const struct tdb_ext_response *resp)
     /* NOTE: if the request offset=0 the return offset must be 0 too */
     if (resp->offset)
         return TDB_ERR_EXT_SERVER_FAILURE;
-    if (resp->max_size < TOC_FILE_OFFSET)
+    if (resp->size < TOC_FILE_OFFSET)
         return TDB_ERR_EXT_INVALID_HEADER;
 
     /*
@@ -61,12 +61,12 @@ static int is_invalid_header(const struct tdb_ext_response *resp)
     newline. Once we find it, we know that we have got the full file.
     */
     TDB_OPEN(f, resp->path, "r");
-    p = mmap(NULL, resp->max_size, PROT_READ, MAP_SHARED, fileno(f), 0);
+    p = mmap(NULL, resp->size, PROT_READ, MAP_SHARED, fileno(f), 0);
     fclose(f);
     if (p == MAP_FAILED)
         return TDB_ERR_IO_READ;
 
-    for (offset = TOC_FILE_OFFSET; offset < resp->max_size - 1; offset++){
+    for (offset = TOC_FILE_OFFSET; offset < resp->size - 1; offset++){
         if (p[offset] == '\n' && p[offset + 1] == '\n'){
             ret = 0;
             break;
@@ -74,13 +74,13 @@ static int is_invalid_header(const struct tdb_ext_response *resp)
     }
 done:
     if (p)
-        munmap(p, resp->max_size);
+        munmap(p, resp->size);
     return ret;
 }
 
 static tdb_error open_package_header(tdb *db, const char *root)
 {
-    struct tdb_ext_response resp;
+    struct tdb_ext_packet resp;
     tdb_error err;
     uint64_t head_size = INITIAL_HEAD_SIZE;
 
@@ -92,7 +92,7 @@ static tdb_error open_package_header(tdb *db, const char *root)
     until we have found the full TOC.
     */
     while (1){
-        if ((err = ext_comm_request(db, "READ", 0, head_size, root, "", &resp)))
+        if ((err = ext_comm_request(db, "READ", 0, head_size, &resp)))
             return err;
 
         head_size += HEAD_SIZE_INCREMENT;
@@ -166,7 +166,7 @@ void free_external(tdb *db)
 
 FILE *external_fopen(const char *fname, const char *root, const tdb *db)
 {
-    struct tdb_ext_response resp;
+    struct tdb_ext_packet resp;
     uint64_t offset, size;
     FILE *f;
 
@@ -174,7 +174,7 @@ FILE *external_fopen(const char *fname, const char *root, const tdb *db)
         return NULL;
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wcast-qual"
-    if (ext_comm_request((tdb*)db, "READ", offset, size, root, "", &resp))
+    if (ext_comm_request((tdb*)db, "READ", offset, size, &resp))
         return NULL;
 #pragma GCC diagnostic pop
     if (!(f = fopen(resp.path, "r")))
