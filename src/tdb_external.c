@@ -114,6 +114,12 @@ static tdb_error open_package_header(tdb *db, const char *root)
     return open_package(db, resp.path);
 }
 
+int is_external_path(const char *path)
+{
+    char *p = strstr(path, "://");
+    return p && (p - path < 6);
+}
+
 void external_init(tdb *db)
 {
     tdb_opt_value val;
@@ -130,6 +136,7 @@ void external_init(tdb *db)
 tdb_error open_external(tdb *db, const char *root)
 {
     tdb_error err;
+    struct tdb_ext_packet resp;
 
     if (!(db->root = strdup(root)))
         return TDB_ERR_NOMEM;
@@ -140,11 +147,7 @@ tdb_error open_external(tdb *db, const char *root)
     /* handshake with the external server */
     if ((err = ext_comm_connect(db)))
         return err;
-    /*
-    FIXME - send root in the request so the server can confirm that
-    it can handle the protocol, return TDB_ERR_EXT_PROTOCOL if it can't
-    */
-    if ((err = ext_comm_request_simple(db, TDB_EXT_LATEST_VERSION)))
+    if ((err = ext_comm_request(db, TDB_EXT_LATEST_VERSION, 0, 0, &resp)))
         return err;
     /* fetch the package header and parse the TOC */
     if ((err = open_package_header(db, root)))
@@ -155,13 +158,13 @@ tdb_error open_external(tdb *db, const char *root)
 
 void free_external(tdb *db)
 {
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wcast-qual"
-    free((char*)db->root);
-#pragma GCC diagnostic pop
     ext_fault_free(db);
     ext_comm_free(db);
     free_package(db);
+#pragma GCC diagnostic push
+    free((char*)db->root);
+#pragma GCC diagnostic ignored "-Wcast-qual"
+#pragma GCC diagnostic pop
 }
 
 FILE *external_fopen(const char *fname, const char *root, const tdb *db)

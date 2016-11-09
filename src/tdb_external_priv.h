@@ -25,8 +25,6 @@ tdb_error ext_comm_request(tdb *db,
                            uint64_t min_size,
                            struct tdb_ext_packet *resp);
 
-tdb_error ext_comm_request_simple(tdb *db, const char *type);
-
 void ext_comm_free(tdb *db);
 
 /* pagefault */

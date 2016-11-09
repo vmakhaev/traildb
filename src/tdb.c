@@ -315,34 +315,34 @@ TDB_EXPORT tdb_error tdb_open(tdb *db, const char *orig_root)
     /* set default options */
     db->opt_cursor_event_buffer_size = DEFAULT_OPT_CURSOR_EVENT_BUFFER_SIZE;
 
-    TDB_PATH(root, "%s", orig_root);
-    if (stat(root, &stats) == -1){
-        TDB_PATH(root, "%s.tdb", orig_root);
-        if (stat(root, &stats) == -1){
-            ret = TDB_ERR_IO_OPEN;
-            goto done;
-        }
-    }
-    if (S_ISDIR(stats.st_mode)){
-        /* open tdb in a directory */
-        io.fopen = file_fopen;
-        io.fclose = file_fclose;
-        io.mmap = file_mmap;
-    }else{
-        /* open tdb in a tarball */
+    if (is_external_path(orig_root)){
         io.fopen = external_fopen;
         io.fclose = external_fclose;
         io.mmap = external_mmap;
-        if ((ret = open_external(db, root)))
+        if ((ret = open_external(db, orig_root)))
             goto done;
-        /*
-        FIXME - this is disabled for development
-        io.fopen = package_fopen;
-        io.fclose = package_fclose;
-        io.mmap = package_mmap;
-        if ((ret = open_package(db, root)))
-            goto done;
-        */
+    }else{
+        TDB_PATH(root, "%s", orig_root);
+        if (stat(root, &stats) == -1){
+            TDB_PATH(root, "%s.tdb", orig_root);
+            if (stat(root, &stats) == -1){
+                ret = TDB_ERR_IO_OPEN;
+                goto done;
+            }
+        }
+        if (S_ISDIR(stats.st_mode)){
+            /* open tdb in a directory */
+            io.fopen = file_fopen;
+            io.fclose = file_fclose;
+            io.mmap = file_mmap;
+        }else{
+            /* open tdb in a tarball */
+            io.fopen = package_fopen;
+            io.fclose = package_fclose;
+            io.mmap = package_mmap;
+            if ((ret = open_package(db, root)))
+                goto done;
+        }
     }
 
     if ((ret = read_info(db, root, &io)))
@@ -679,6 +679,10 @@ TDB_EXPORT const char *tdb_error_str(tdb_error errcode)
             return "TDB_ERR_EXT_SERVER_FAILURE";
         case        TDB_ERR_EXT_INVALID_HEADER:
             return "TDB_ERR_EXT_INVALID_HEADER";
+        case        TDB_ERR_EXT_UNSUPPORTED_PROTOCOL:
+            return "TDB_ERR_EXT_UNSUPPORTED_PROTOCOL";
+        case        TDB_ERR_EXT_NOT_FOUND:
+            return "TDB_ERR_EXT_NOT_FOUND";
         default:
             return "Unknown error";
     }

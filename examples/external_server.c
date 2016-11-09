@@ -169,7 +169,6 @@ static int send_bytes(int fd, const char *buf, uint32_t num_bytes)
 static int receive_request(int fd, struct tdb_ext_packet *req)
 {
     int ret;
-
     if ((ret = receive_bytes(fd, (char*)req, TDB_EXT_PACKET_HEAD_SIZE)))
         return ret;
 
@@ -179,17 +178,24 @@ static int receive_request(int fd, struct tdb_ext_packet *req)
     if ((ret = receive_bytes(fd, req->path, req->path_len)))
         return ret;
     req->path[req->path_len] = 0;
-
-    return 0;
+    if (strncmp(req->path, "file://", 7))
+        return -4;
+    else{
+        uint32_t len = req->path_len - 7;
+        memmove(req->path, &req->path[7], len);
+        req->path[len] = 0;
+        return 0;
+    }
 }
 
 static int send_response(int fd,
+                         const char *type,
                          uint64_t offset,
                          uint64_t max_size,
                          const char *path)
 {
     struct tdb_ext_packet resp;
-    memcpy(resp.type, "OKOK", 4);
+    memcpy(resp.type, type, 4);
     resp.offset = offset;
     resp.size = max_size;
     resp.path_len = strlen(path);
@@ -210,6 +216,7 @@ static int serve_block(int fd, const struct tdb_ext_packet *req)
         return -1;
 
     return send_response(fd,
+                         "OKOK",
                          req->offset,
                          stats.st_size - req->offset,
                          req->path);
@@ -224,7 +231,11 @@ static int handle_request(int fd, const struct tdb_ext_packet *req)
            req->offset,
            req->size);
     if (!memcmp(req->type, "V000", 4)){
-        return send_response(fd, 0, 0, "");
+        struct stat stats;
+        if (stat(req->path, &stats)){
+            return send_response(fd, "MISS", 0, 0, "");
+        }else
+            return send_response(fd, "OKOK", 0, 0, "");
     }else if (!memcmp(req->type, "READ", 4)){
         return serve_block(fd, req);
     }else if (!memcmp(req->type, "EXIT", 4))
@@ -278,8 +289,13 @@ static void server(int port, int verbose)
                         PEER_MSG("Truncated message\n");
                     }else if (ret == -2){
                         PEER_MSG("Message timeout\n");
-                    }else{
+                    }else if (ret == -3){
                         PEER_MSG("Oversized message\n");
+                    }else if (ret == -4){
+                        send_response(fd, "PROT", 0, 0, "");
+                        PEER_MSG("Unknown protocol: %s\n", req.path);
+                    }else{
+                        PEER_MSG("Unknown error %d\n", ret);
                     }
                     close(fd);
                 }else{

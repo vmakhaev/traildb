@@ -2,6 +2,8 @@
 #ifndef __TDB_EXTENRAL_H__
 #define __TDB_EXTERNAL_H__
 
+int is_external_path(const char *path);
+
 void external_init(tdb *db);
 
 tdb_error open_external(tdb *db, const char *root);

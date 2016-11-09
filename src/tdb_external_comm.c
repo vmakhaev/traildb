@@ -138,7 +138,12 @@ static tdb_error receive_response(tdb *db, struct tdb_ext_packet *resp)
     if (memcmp(resp->type, "OKOK", 4)){
         shutdown(db->external_conn, SHUT_RDWR);
         close(db->external_conn);
-        return TDB_ERR_EXT_SERVER_FAILURE;
+        if (!memcmp(resp->type, "PROT", 4))
+            return TDB_ERR_EXT_UNSUPPORTED_PROTOCOL;
+        else if (!memcmp(resp->type, "MISS", 4))
+            return TDB_ERR_EXT_NOT_FOUND;
+        else
+            return TDB_ERR_EXT_SERVER_FAILURE;
     }
     return receive_bytes(db->external_conn,
                          &ptr[TDB_EXT_PACKET_HEAD_SIZE],
@@ -193,12 +198,6 @@ tdb_error ext_comm_request(tdb *db,
     return receive_response(db, resp);
 }
 
-tdb_error ext_comm_request_simple(tdb *db, const char *type)
-{
-    struct tdb_ext_packet resp;
-    return ext_comm_request(db, type, 0, 0, &resp);
-}
-
 void ext_comm_free(tdb *db)
 {
 #pragma GCC diagnostic push
@@ -208,7 +207,8 @@ void ext_comm_free(tdb *db)
 #pragma GCC diagnostic pop
 
     if (db->external_conn){
-        ext_comm_request_simple(db, "EXIT");
+        struct tdb_ext_packet resp;
+        ext_comm_request(db, "EXIT", 0, 0, &resp);
         close(db->external_conn);
     }
 }
