@@ -290,7 +290,7 @@ tdb_error ext_fault_init(tdb *db)
     db->external_uffd = syscall(__NR_userfaultfd, O_CLOEXEC | O_NONBLOCK);
 #pragma GCC diagnostic pop
     if (db->external_uffd == -1)
-        return TDB_ERR_EXT_FAILED;
+        return TDB_ERR_EXT_USERFAULT_NOT_SUPPORTED;
 
     uffdio_api.api = UFFD_API;
     uffdio_api.features = 0;

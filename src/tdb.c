@@ -683,6 +683,8 @@ TDB_EXPORT const char *tdb_error_str(tdb_error errcode)
             return "TDB_ERR_EXT_UNSUPPORTED_PROTOCOL";
         case        TDB_ERR_EXT_NOT_FOUND:
             return "TDB_ERR_EXT_NOT_FOUND";
+        case        TDB_ERR_EXT_USERFAULT_NOT_SUPPORTED:
+            return "TDB_ERR_EXT_USERFAULT_NOT_SUPPORTED";
         default:
             return "Unknown error";
     }
