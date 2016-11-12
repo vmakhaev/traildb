@@ -63,24 +63,35 @@ static uint64_t now(void)
 Interestingly this function must not fail. There's nothing clever we can do
 if we can't handle a page fault. We could segfault or SIGBUS.
 */
-static void request_external_page(tdb *db,
-                                  uint64_t offset,
-                                  struct tdb_ext_packet *resp)
+static int request_external_page(tdb *db,
+                                 uint64_t offset,
+                                 struct tdb_ext_packet *resp)
 {
     tdb_error err;
     uint64_t start = now();
     uint64_t num_retries = 0;
+    int fd;
 
-    while ((err = ext_comm_request(db, "READ", offset, PAGESIZE, resp))){
+    while (1){
+        /* request a block from the external server */
+        if (!(err = ext_comm_request(db, "READ", offset, PAGESIZE, resp))){
+            /*
+            request succeeded. We still need to make sure the block is
+            actually accessible. It may have already disappeard e.g. due
+            to cache eviction on the server side.
+            */
+            if ((fd = open(resp->path, O_RDONLY)) != -1)
+                return fd;
+        }
+        /* request failed - retry with exponential backoff */
         if (db->external_retry_timeout > 0 &&
             now() - start > db->external_retry_timeout)
-            ext_die("FATAL! "
-                    "Requesting a page for %s at %lu timed out (error %s)!\n",
+            ext_die("FATAL! Requesting a page for %s at %lu "
+                    "timed out (error %s)!\n",
                     db->root,
                     offset,
                     tdb_error_str(err));
 
-        /* exponential backoff */
         if (num_retries < MAX_EXP_BACKOFF_POWER)
             ++num_retries;
         sleep(1U << num_retries);
@@ -95,14 +106,7 @@ static void populate_cache(tdb *db, struct tdb_file *region, uint64_t requested_
     int fd;
 
     free_cache(region);
-    request_external_page(db, ext_offset, &resp);
-
-    if ((fd = open(resp.path, O_RDONLY)) == -1)
-        ext_die("Could not open a block at %s (requested %s at %lu): %s\n",
-                resp.path,
-                db->root,
-                ext_offset,
-                strerror(errno));
+    fd = request_external_page(db, ext_offset, &resp);
 
     /*
     memory map the section of the block that contains the page requested

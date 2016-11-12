@@ -144,12 +144,17 @@ tdb_error open_external(tdb *db, const char *root)
     /* initialize page fault handler */
     if ((err = ext_fault_init(db)))
         return err;
-    /* handshake with the external server */
+    /* open connection to the external server */
     if ((err = ext_comm_connect(db)))
         return err;
+    /*
+    handshake with the external server. Possible replies:
+    - TDB_ERR_EXT_UNSUPPORTED_PROTOCOL - scheme not supported by the server
+    - TDB_ERR_EXT_NOT_FOUND - object was not found
+    */
     if ((err = ext_comm_request(db, TDB_EXT_LATEST_VERSION, 0, 0, &resp)))
         return err;
-    /* fetch the package header and parse the TOC */
+    /* object found - fetch the package header and parse the TOC */
     if ((err = open_package_header(db, root)))
         return err;
 
@@ -198,9 +203,8 @@ int external_mmap(const char *fname,
                   const tdb *db)
 {
     /*
-    note that we store offset and size in dst as an optimization.
-    Technically we could call package_toc_get for every page fault
-    but this is faster.
+    lookup the offset and the size of the region requested
+    in the package header
     */
     if (package_toc_get(db, fname, &dst->src_offset, &dst->size))
         return -1;
