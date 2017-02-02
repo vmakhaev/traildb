@@ -411,11 +411,13 @@ tdb_error make_grams(FILE *grouped,
     TDB_TIMER_END("encode_model/find_candidates")
 
     /* collect frequencies of *all* occurring bigrams of candidate unigrams */
+    /*
     TDB_TIMER_START
     ret = event_fold(all_bigrams, grouped, num_events, items, num_fields, &g);
     if (ret)
         goto done;
     TDB_TIMER_END("encode_model/all_bigrams")
+    */
 
     /* collect frequencies of non-overlapping bigrams and unigrams
        (exact covering set for each event), store in final_freqs */
