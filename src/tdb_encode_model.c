@@ -62,12 +62,13 @@ static double get_sample_size(void)
 static tdb_error event_fold(event_op op,
                             FILE *grouped,
                             uint64_t num_events,
-                            const tdb_item *items,
+                            FILE *itemsfd,
                             uint64_t num_fields,
                             void *state)
 {
     dsfmt_t rand_state;
     tdb_item *prev_items = NULL;
+    tdb_item *itemsbuf = NULL;
     tdb_item *encoded = NULL;
     uint64_t encoded_size = 0;
     uint64_t i = 1;
@@ -85,6 +86,10 @@ static tdb_error event_fold(event_op op,
         sample_size = get_sample_size();
 
     if (!(prev_items = malloc(num_fields * sizeof(tdb_item)))){
+        ret = TDB_ERR_NOMEM;
+        goto done;
+    }
+    if (!(itemsbuf = malloc(num_fields * sizeof(tdb_item)))){
         ret = TDB_ERR_NOMEM;
         goto done;
     }
@@ -111,7 +116,14 @@ static tdb_error event_fold(event_op op,
             memset(prev_items, 0, num_fields * sizeof(tdb_item));
 
             while (ev.trail_id == trail_id){
-                if ((ret = edge_encode_items(items,
+
+                if (ev.num_items){
+                    TDB_SEEK(itemsfd, ev.item_zero * sizeof(tdb_item));
+                    TDB_READ(itemsfd, itemsbuf, ev.num_items * sizeof(tdb_item));
+                }
+
+                if ((ret = edge_encode_items(itemsbuf,
+                                             ev.num_items,
                                              &encoded,
                                              &n,
                                              &encoded_size,
@@ -138,6 +150,7 @@ static tdb_error event_fold(event_op op,
 done:
     free(encoded);
     free(prev_items);
+    free(itemsbuf);
 
     return ret;
 }
@@ -382,7 +395,7 @@ static tdb_error all_bigrams(const tdb_item *encoded,
 
 tdb_error make_grams(FILE *grouped,
                      uint64_t num_events,
-                     const tdb_item *items,
+                     FILE *itemsfd,
                      uint64_t num_fields,
                      const Pvoid_t unigram_freqs,
                      struct judy_128_map *final_freqs)
@@ -411,16 +424,18 @@ tdb_error make_grams(FILE *grouped,
     TDB_TIMER_END("encode_model/find_candidates")
 
     /* collect frequencies of *all* occurring bigrams of candidate unigrams */
+    /*
     TDB_TIMER_START
     ret = event_fold(all_bigrams, grouped, num_events, items, num_fields, &g);
     if (ret)
         goto done;
     TDB_TIMER_END("encode_model/all_bigrams")
+    */
 
     /* collect frequencies of non-overlapping bigrams and unigrams
        (exact covering set for each event), store in final_freqs */
     TDB_TIMER_START
-    ret = event_fold(choose_grams, grouped, num_events, items, num_fields, &g);
+    ret = event_fold(choose_grams, grouped, num_events, itemsfd, num_fields, &g);
     if (ret)
         goto done;
     TDB_TIMER_END("encode_model/choose_grams")
@@ -468,12 +483,12 @@ out_of_memory:
 
 Pvoid_t collect_unigrams(FILE *grouped,
                          uint64_t num_events,
-                         const tdb_item *items,
+                         FILE *itemsfd,
                          uint64_t num_fields)
 {
     /* calculate frequencies of all items */
     struct unigram_state state = {.freqs = NULL};
-    if (event_fold(all_freqs, grouped, num_events, items, num_fields, &state))
+    if (event_fold(all_freqs, grouped, num_events, itemsfd, num_fields, &state))
         return NULL;
     else
         return state.freqs;

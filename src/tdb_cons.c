@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
 
 #undef JUDYERROR
 #define JUDYERROR(CallerFile, CallerLine, JudyFunc, JudyErrno, JudyErrID) \
@@ -652,7 +653,7 @@ TDB_EXPORT tdb_error tdb_cons_finalize(tdb_cons *cons)
     struct tdb_file items_mmapped;
     uint64_t num_events = cons->events.next;
     int ret = 0;
-
+    fprintf(stderr, "FINALIZE!\n");
     memset(&items_mmapped, 0, sizeof(struct tdb_file));
 
     /* finalize event items */
@@ -665,14 +666,28 @@ TDB_EXPORT tdb_error tdb_cons_finalize(tdb_cons *cons)
         goto done;
     }
     cons->items.fd = NULL;
+    FILE *itemsfd = NULL;
 
     if (cons->tempfile[0]){
         if (num_events && cons->num_ofields) {
+            TDB_OPEN(itemsfd, cons->tempfile, "r");
+            fprintf(stderr, "ITEMSFD!\n");
+            /*
             if (file_mmap(cons->tempfile, NULL, &items_mmapped, NULL)){
                 ret = TDB_ERR_IO_READ;
                 goto done;
             }
+            fprintf(stderr, "applying MADV_RANDOM & DONT & NOHUGE (fuu)\n");
+            if (madvise(items_mmapped.ptr, items_mmapped.mmap_size, MADV_NOHUGEPAGE))
+                fprintf(stderr, "MADV_NOHUGEPAGE failed: %d\n", errno);
+            if (madvise(items_mmapped.ptr, items_mmapped.mmap_size, MADV_RANDOM))
+                fprintf(stderr, "MADV_RANDOM failed: %d\n", errno);
+            if (madvise(items_mmapped.ptr, items_mmapped.mmap_size, MADV_DONTNEED))
+                fprintf(stderr, "MADV_RANDOM failed: %d\n", errno);
+            fprintf(stderr, "applying MADV_RANDOM & DONT ok\n");
+            */
         }
+
 
         TDB_TIMER_DEF
 
@@ -692,13 +707,13 @@ TDB_EXPORT tdb_error tdb_cons_finalize(tdb_cons *cons)
         TDB_TIMER_END("encoder/store_version")
 
         TDB_TIMER_START
-        if ((ret = tdb_encode(cons, (const tdb_item*)items_mmapped.data)))
+        if ((ret = tdb_encode(cons, itemsfd)))
             goto done;
         TDB_TIMER_END("encoder/encode")
     }
 done:
-    if (items_mmapped.ptr)
-        munmap(items_mmapped.ptr, items_mmapped.mmap_size);
+    //if (items_mmapped.ptr)
+     //   munmap(items_mmapped.ptr, items_mmapped.mmap_size);
 
     if (cons->tempfile[0])
         unlink(cons->tempfile);

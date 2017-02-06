@@ -162,17 +162,18 @@ static tdb_error groupby_uuid(FILE *grouped_w,
 }
 
 tdb_error edge_encode_items(const tdb_item *items,
+                            uint64_t num_items,
                             tdb_item **encoded,
                             uint64_t *num_encoded,
                             uint64_t *encoded_size,
                             tdb_item *prev_items,
                             const struct tdb_grouped_event *ev)
 {
-    uint64_t n = 0;
-    uint64_t j = ev->item_zero;
+    uint64_t j, n = 0;
+    //uint64_t j = ev->item_zero;
     /* edge encode items: keep only fields that are different from
        the previous event */
-    for (; j < ev->item_zero + ev->num_items; j++){
+    for (j = 0; j < num_items; j++){
         tdb_field field = tdb_item_field(items[j]);
         if (prev_items[field] != items[j]){
             if (n == *encoded_size){
@@ -215,7 +216,7 @@ done:
     return ret;
 }
 
-static tdb_error encode_trails(const tdb_item *items,
+static tdb_error encode_trails(FILE *itemsfd,
                                FILE *grouped,
                                uint64_t num_events,
                                uint64_t num_trails,
@@ -228,6 +229,7 @@ static tdb_error encode_trails(const tdb_item *items,
 {
     __uint128_t *grams = NULL;
     tdb_item *prev_items = NULL;
+    tdb_item *itemsbuf = NULL;
     uint64_t *encoded = NULL;
     uint64_t encoded_size = 0;
     uint64_t buf_size = INITIAL_ENCODING_BUF_BITS;
@@ -260,6 +262,11 @@ static tdb_error encode_trails(const tdb_item *items,
         ret = TDB_ERR_NOMEM;
         goto done;
     }
+    if (!(itemsbuf = malloc(num_fields * sizeof(tdb_item)))){
+        ret = TDB_ERR_NOMEM;
+        goto done;
+    }
+
     if (!(grams = malloc(num_fields * 16))){
         ret = TDB_ERR_NOMEM;
         goto done;
@@ -289,8 +296,14 @@ static tdb_error encode_trails(const tdb_item *items,
 
         while (ev.trail_id == trail_id){
 
+            if (ev.num_items){
+                TDB_SEEK(itemsfd, ev.item_zero * sizeof(tdb_item));
+                TDB_READ(itemsfd, itemsbuf, ev.num_items * sizeof(tdb_item));
+            }
+
             /* 1) produce an edge-encoded set of items for this event */
-            if ((ret = edge_encode_items(items,
+            if ((ret = edge_encode_items(itemsbuf,
+                                         ev.num_items,
                                          &encoded,
                                          &n,
                                          &encoded_size,
@@ -373,6 +386,7 @@ done:
     free(grams);
     free(encoded);
     free(prev_items);
+    free(itemsbuf);
     free(buf);
     free(toc);
 
@@ -396,7 +410,7 @@ done:
     return ret;
 }
 
-tdb_error tdb_encode(tdb_cons *cons, const tdb_item *items)
+tdb_error tdb_encode(tdb_cons *cons, FILE *itemsfd)
 {
     char path[TDB_MAX_PATH_SIZE];
     char grouped_path[TDB_MAX_PATH_SIZE];
@@ -488,7 +502,7 @@ tdb_error tdb_encode(tdb_cons *cons, const tdb_item *items)
 
     /* 3. collect value (unigram) freqs, including delta-encoded timestamps */
     TDB_TIMER_START
-    unigram_freqs = collect_unigrams(grouped_r, num_events, items, num_fields);
+    unigram_freqs = collect_unigrams(grouped_r, num_events, itemsfd, num_fields);
     if (num_events > 0 && !unigram_freqs){
         ret = TDB_ERR_NOMEM;
         goto done;
@@ -499,7 +513,7 @@ tdb_error tdb_encode(tdb_cons *cons, const tdb_item *items)
     TDB_TIMER_START
     if ((ret = make_grams(grouped_r,
                           num_events,
-                          items,
+                          itemsfd,
                           num_fields,
                           unigram_freqs,
                           &gram_freqs)))
@@ -522,7 +536,7 @@ tdb_error tdb_encode(tdb_cons *cons, const tdb_item *items)
     TDB_TIMER_START
     TDB_PATH(path, "%s/trails.data", root);
     TDB_PATH(toc_path, "%s/trails.toc", root);
-    if ((ret = encode_trails(items,
+    if ((ret = encode_trails(itemsfd,
                              grouped_r,
                              num_events,
                              num_trails,

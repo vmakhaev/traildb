@@ -173,9 +173,10 @@ const char *tdb_lexicon_get(const struct tdb_lexicon *lex,
                             tdb_val i,
                             uint64_t *length);
 
-tdb_error tdb_encode(tdb_cons *cons, const tdb_item *items);
+tdb_error tdb_encode(tdb_cons *cons, FILE *itemsfd);
 
 tdb_error edge_encode_items(const tdb_item *items,
+                            uint64_t num_items,
                             tdb_item **encoded,
                             uint64_t *num_encoded,
                             uint64_t *encoded_size,
