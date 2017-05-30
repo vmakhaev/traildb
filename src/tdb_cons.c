@@ -918,6 +918,7 @@ TDB_EXPORT tdb_error tdb_cons_append_many(tdb_cons *cons,
                           * sizeof(tdb_multi_event))))
         goto done;
 
+    /* initialize the heap over UUIDs */
     if (!(queue = pqueue_init(num_dbs,
                               cmp_pri,
                               get_pri,
@@ -938,7 +939,13 @@ TDB_EXPORT tdb_error tdb_cons_append_many(tdb_cons *cons,
     if (!(mcursor = tdb_multi_cursor_new(cursors, j)))
         goto done;
 
+    /*
+    loop until all UUIDs (trails) across all input tdbs have
+    been processed. This will process UUIDs in the ascending
+    order, merging trails from all the input tdbs on the fly
+    */
     while ((node = (struct uuid_node*)pqueue_pop(queue))){
+        /* this is the smallest unprocessed UUID */
         const uint8_t *uuid = (const uint8_t*)node->uuid;
         __uint128_t key = node->key;
 
@@ -947,6 +954,10 @@ TDB_EXPORT tdb_error tdb_cons_append_many(tdb_cons *cons,
         if (++node->trail_id < node->num_trails)
             insert_node(queue, node);
 
+        /*
+        extract the same UUID (trail) from all other input
+        tdbs - maybe there are none
+        */
         while (1){
             node = (struct uuid_node*)pqueue_peek(queue);
             if (!(node && node->key == key))
@@ -959,8 +970,17 @@ TDB_EXPORT tdb_error tdb_cons_append_many(tdb_cons *cons,
                 insert_node(queue, node);
         }
 
+        /*
+        now all cursors are reset to the smallest UUID, reset the
+        multicursor to iterate over them
+        */
         tdb_multi_cursor_reset(mcursor);
 
+        /*
+        merge events related to this UUID. This guarantees that events
+        are added in the ascending time-order, which makes finalization
+        more efficient
+        */
         while ((n = tdb_multi_cursor_next_batch(mcursor,
                                                 events,
                                                 CONS_APPEND_MANY_NUM_EVENTS))){
