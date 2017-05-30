@@ -115,7 +115,7 @@ static tdb **open_tdbs(const char **inputs,
     for (i = 0; i < num_inputs; i++){
         dbs[i] = open_tdb(inputs[i]);
         n = tdb_num_fields(dbs[i]);
-        if (i > 0 && n != *num_fields)
+        if (i > 0 && n != *num_fields + 1)
             *equal_fields = 0;
 
         for (j = 1; j < n; j++){
@@ -133,11 +133,16 @@ static tdb **open_tdbs(const char **inputs,
     if (!(fields = malloc(*num_fields * sizeof(char*))))
         DIE("Out of memory");
 
-    fieldname[0] = i = 0;
-    JSLF(ptr, dedup_fields, fieldname);
-    while (ptr){
-        fields[i++] = (const char*)*ptr;
-        JSLN(ptr, dedup_fields, fieldname);
+    if (*equal_fields){
+        for (i = 0; i < *num_fields; i++)
+            fields[i] = tdb_get_field_name(dbs[0], i + 1);
+    }else{
+        fieldname[0] = i = 0;
+        JSLF(ptr, dedup_fields, fieldname);
+        while (ptr){
+            fields[i++] = (const char*)*ptr;
+            JSLN(ptr, dedup_fields, fieldname);
+        }
     }
 
     JSLFA(tmp, dedup_fields);
@@ -192,14 +197,16 @@ int op_merge(struct tdbcli_options *opt,
                 "TrailDB library doesn't understand TDB_OPT_CONS_NO_BIGRAMS; "
                 "library not up-to-date?");
 
-    for (i = 0; i < num_inputs; i++){
-        if (equal_fields){
-            if ((err = tdb_cons_append(cons, dbs[i])))
-                DIE("Merging %s failed: %s", inputs[i], tdb_error_str(err));
-        }else
+    if (equal_fields){
+        if ((err = tdb_cons_append_many(cons, (const tdb**)dbs, num_inputs)))
+            DIE("Merging failed: %s", tdb_error_str(err));
+    }else{
+        /*
+        TODO tdb_cons_append_many should be used here as well,
+        once it will work with mismatching fields
+        */
+        for (i = 0; i < num_inputs; i++)
             map_fields_and_append(cons, dbs[i], fields, num_fields);
-
-        /* field names may point to this db, so we can't close it yet */
         tdb_dontneed(dbs[i]);
     }
 

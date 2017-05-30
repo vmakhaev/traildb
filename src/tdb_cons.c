@@ -704,6 +704,115 @@ TDB_EXPORT tdb_error tdb_cons_append(tdb_cons *cons, const tdb *db)
         return tdb_cons_append_full_lexicon(cons, db);
 }
 
+TDB_EXPORT tdb_error tdb_cons_finalize(tdb_cons *cons)
+{
+    struct tdb_file items_mmapped;
+    uint64_t num_events = cons->events.next;
+    int ret = 0;
+
+    memset(&items_mmapped, 0, sizeof(struct tdb_file));
+
+    /* finalize event items */
+    if ((ret = arena_flush(&cons->items)))
+        goto done;
+
+    if (cons->items.fd && fclose(cons->items.fd)) {
+        cons->items.fd = NULL;
+        ret = TDB_ERR_IO_CLOSE;
+        goto done;
+    }
+    cons->items.fd = NULL;
+
+    if (cons->tempfile[0]){
+        if (num_events && cons->num_ofields) {
+            if (file_mmap(cons->tempfile, NULL, &items_mmapped, NULL)){
+                ret = TDB_ERR_IO_READ;
+                goto done;
+            }
+        }
+
+        TDB_TIMER_DEF
+
+        TDB_TIMER_START
+        if ((ret = store_lexicons(cons)))
+            goto done;
+        TDB_TIMER_END("encoder/store_lexicons")
+
+        TDB_TIMER_START
+        if ((ret = store_uuids(cons)))
+            goto done;
+        TDB_TIMER_END("encoder/store_uuids")
+
+        TDB_TIMER_START
+        if ((ret = store_version(cons)))
+            goto done;
+        TDB_TIMER_END("encoder/store_version")
+
+        TDB_TIMER_START
+        if ((ret = tdb_encode(cons, (const tdb_item*)items_mmapped.data)))
+            goto done;
+        TDB_TIMER_END("encoder/encode")
+    }
+done:
+    if (items_mmapped.ptr)
+        munmap(items_mmapped.ptr, items_mmapped.mmap_size);
+
+    if (cons->tempfile[0])
+        unlink(cons->tempfile);
+
+    if (!ret){
+        #ifdef HAVE_ARCHIVE_H
+        if (cons->output_format == TDB_OPT_CONS_OUTPUT_FORMAT_PACKAGE)
+            ret = cons_package(cons);
+        #endif
+    }
+    return ret;
+}
+
+TDB_EXPORT tdb_error tdb_cons_set_opt(tdb_cons *cons,
+                                      tdb_opt_key key,
+                                      tdb_opt_value value)
+{
+    switch (key){
+        case TDB_OPT_CONS_OUTPUT_FORMAT:
+            switch (value.value){
+                #ifdef HAVE_ARCHIVE_H
+                case TDB_OPT_CONS_OUTPUT_FORMAT_PACKAGE:
+                #endif
+                case TDB_OPT_CONS_OUTPUT_FORMAT_DIR:
+                    cons->output_format = value.value;
+                    return 0;
+                default:
+                    return TDB_ERR_INVALID_OPTION_VALUE;
+            }
+        case TDB_OPT_CONS_NO_BIGRAMS:
+            cons->no_bigrams = !(!(value.value));
+            return 0;
+        default:
+            return TDB_ERR_UNKNOWN_OPTION;
+    }
+}
+
+TDB_EXPORT tdb_error tdb_cons_get_opt(tdb_cons *cons,
+                                      tdb_opt_key key,
+                                      tdb_opt_value *value)
+{
+    switch (key){
+        case TDB_OPT_CONS_OUTPUT_FORMAT:
+            value->value = cons->output_format;
+            return 0;
+        case TDB_OPT_CONS_NO_BIGRAMS:
+            value->value = cons->no_bigrams;
+            return 0;
+        default:
+            return TDB_ERR_UNKNOWN_OPTION;
+    }
+}
+
+/*
+helped functions used by tdb_cons_append_many
+*/
+
 struct uuid_node{
     uintptr_t uuid;
     __uint128_t key;
@@ -754,13 +863,6 @@ static inline void insert_node(pqueue_t *queue, struct uuid_node *node)
     pqueue_insert(queue, node);
 }
 
-static void print_node(struct uuid_node *node)
-{
-    uint8_t hex[32];
-    tdb_uuid_hex((const uint8_t*)node->uuid, hex);
-    printf("HEX %.32s\n", hex);
-}
-
 TDB_EXPORT tdb_error tdb_cons_append_many(tdb_cons *cons,
                                           const tdb **dbs,
                                           uint32_t num_dbs)
@@ -784,6 +886,7 @@ TDB_EXPORT tdb_error tdb_cons_append_many(tdb_cons *cons,
     uint64_t num_fields = cons->num_ofields + 1;
     tdb_error ret = TDB_ERR_NOMEM;
 
+    /* TODO remove the requirement that fields have to match */
     for (i = 0; i < num_dbs; i++){
         tdb_field field;
         if (num_fields != dbs[i]->num_fields)
@@ -889,109 +992,4 @@ done:
     free(cursors);
     free(events);
     return ret;
-}
-
-TDB_EXPORT tdb_error tdb_cons_finalize(tdb_cons *cons)
-{
-    struct tdb_file items_mmapped;
-    uint64_t num_events = cons->events.next;
-    int ret = 0;
-
-    memset(&items_mmapped, 0, sizeof(struct tdb_file));
-
-    /* finalize event items */
-    if ((ret = arena_flush(&cons->items)))
-        goto done;
-
-    if (cons->items.fd && fclose(cons->items.fd)) {
-        cons->items.fd = NULL;
-        ret = TDB_ERR_IO_CLOSE;
-        goto done;
-    }
-    cons->items.fd = NULL;
-
-    if (cons->tempfile[0]){
-        if (num_events && cons->num_ofields) {
-            if (file_mmap(cons->tempfile, NULL, &items_mmapped, NULL)){
-                ret = TDB_ERR_IO_READ;
-                goto done;
-            }
-        }
-
-        TDB_TIMER_DEF
-
-        TDB_TIMER_START
-        if ((ret = store_lexicons(cons)))
-            goto done;
-        TDB_TIMER_END("encoder/store_lexicons")
-
-        TDB_TIMER_START
-        if ((ret = store_uuids(cons)))
-            goto done;
-        TDB_TIMER_END("encoder/store_uuids")
-
-        TDB_TIMER_START
-        if ((ret = store_version(cons)))
-            goto done;
-        TDB_TIMER_END("encoder/store_version")
-
-        TDB_TIMER_START
-        if ((ret = tdb_encode(cons, (const tdb_item*)items_mmapped.data)))
-            goto done;
-        TDB_TIMER_END("encoder/encode")
-    }
-done:
-    if (items_mmapped.ptr)
-        munmap(items_mmapped.ptr, items_mmapped.mmap_size);
-
-    if (cons->tempfile[0])
-        unlink(cons->tempfile);
-
-    if (!ret){
-        #ifdef HAVE_ARCHIVE_H
-        if (cons->output_format == TDB_OPT_CONS_OUTPUT_FORMAT_PACKAGE)
-            ret = cons_package(cons);
-        #endif
-    }
-    return ret;
-}
-
-TDB_EXPORT tdb_error tdb_cons_set_opt(tdb_cons *cons,
-                                      tdb_opt_key key,
-                                      tdb_opt_value value)
-{
-    switch (key){
-        case TDB_OPT_CONS_OUTPUT_FORMAT:
-            switch (value.value){
-                #ifdef HAVE_ARCHIVE_H
-                case TDB_OPT_CONS_OUTPUT_FORMAT_PACKAGE:
-                #endif
-                case TDB_OPT_CONS_OUTPUT_FORMAT_DIR:
-                    cons->output_format = value.value;
-                    return 0;
-                default:
-                    return TDB_ERR_INVALID_OPTION_VALUE;
-            }
-        case TDB_OPT_CONS_NO_BIGRAMS:
-            cons->no_bigrams = !(!(value.value));
-            return 0;
-        default:
-            return TDB_ERR_UNKNOWN_OPTION;
-    }
-}
-
-TDB_EXPORT tdb_error tdb_cons_get_opt(tdb_cons *cons,
-                                      tdb_opt_key key,
-                                      tdb_opt_value *value)
-{
-    switch (key){
-        case TDB_OPT_CONS_OUTPUT_FORMAT:
-            value->value = cons->output_format;
-            return 0;
-        case TDB_OPT_CONS_NO_BIGRAMS:
-            value->value = cons->no_bigrams;
-            return 0;
-        default:
-            return TDB_ERR_UNKNOWN_OPTION;
-    }
 }
