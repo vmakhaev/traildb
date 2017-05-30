@@ -810,7 +810,7 @@ TDB_EXPORT tdb_error tdb_cons_get_opt(tdb_cons *cons,
 }
 
 /*
-helped functions used by tdb_cons_append_many
+functions related to tdb_cons_append_many below
 */
 
 struct uuid_node{
@@ -822,8 +822,6 @@ struct uuid_node{
     uint64_t num_trails;
     tdb_cursor *cursor;
 };
-
-/* pqueue callback functions */
 
 static int cmp_pri(pqueue_pri_t a, pqueue_pri_t b)
 {
@@ -863,6 +861,19 @@ static inline void insert_node(pqueue_t *queue, struct uuid_node *node)
     pqueue_insert(queue, node);
 }
 
+
+/*
+tdb_cons_append_many is an optimized alternative for calling
+tdb_cons_append() in a loop over K traildbs. The main benefit of this
+function is that it ensures that both UUIDs and events are added
+consecutively (in order) to disk. This can make tdb_cons_finalize()
+much more efficient for large amounts of data, since random disk IO is
+avoided - in particular when all the data doesn't fit in RAM.
+
+This function is leveraged by `tdb merge`. A typical use case is in a
+map-reduce pattern where multiple tdb shards are merged (reduced) to a
+single large shard using this function.
+*/
 TDB_EXPORT tdb_error tdb_cons_append_many(tdb_cons *cons,
                                           const tdb **dbs,
                                           uint32_t num_dbs)
@@ -1003,7 +1014,7 @@ done:
         pqueue_free(queue);
     if (trails){
         for (i = 0; i < num_dbs; i++)
-            tdb_cursor_free(cursors[i]);
+            tdb_cursor_free(trails[i].cursor);
         free(trails);
     }
     tdb_multi_cursor_free(mcursor);
