@@ -116,6 +116,7 @@ static tdb_error event_fold(event_op op,
                                              &n,
                                              &encoded_size,
                                              prev_items,
+                                             num_fields,
                                              &ev)))
                     goto done;
 

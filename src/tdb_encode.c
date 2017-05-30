@@ -194,22 +194,47 @@ tdb_error edge_encode_items(const tdb_item *items,
                             uint64_t *num_encoded,
                             uint64_t *encoded_size,
                             tdb_item *prev_items,
+                            uint64_t num_fields,
                             const struct tdb_grouped_event *ev)
 {
     uint64_t n = 0;
-    uint64_t j = ev->item_zero;
-    /* edge encode items: keep only fields that are different from
-       the previous event */
-    for (; j < ev->item_zero + ev->num_items; j++){
-        tdb_field field = tdb_item_field(items[j]);
-        if (prev_items[field] != items[j]){
+    uint64_t j = 0;//ev->item_zero;
+    tdb_field field, ev_field = (tdb_field)num_fields + 1;
+    tdb_item ev_item = 0;
+
+    if (ev->num_items){
+        ev_item = items[ev->item_zero + j++];
+        ev_field = tdb_item_field(ev_item);
+    }
+
+    /*
+    Edge encode items: keep only fields that are different from
+    the previous event. Note that events are stored sparsely: Not
+    all fields may be present. The absent fields are interpreted
+    as nulls.
+    */
+    for (field = 0; field < num_fields; field++){
+        tdb_item item;
+
+        if (field == ev_field){
+            /* this field is present in the stored event */
+            item = ev_item;
+            if (j < ev->num_items){
+                ev_item = items[ev->item_zero + j++];
+                ev_field = tdb_item_field(ev_item);
+            }
+        }else
+            /* this field is absent from the stored event, i.e. null */
+            item = tdb_make_item(field, 0);
+
+        if (prev_items[field] != item){
             if (n == *encoded_size){
                 *encoded_size += EDGE_INCREMENT;
                 if (!(*encoded = realloc(*encoded,
                                          *encoded_size * sizeof(tdb_item))))
                     return TDB_ERR_NOMEM;
             }
-            (*encoded)[n++] = prev_items[field] = items[j];
+            (*encoded)[n++] = prev_items[field] = item;
         }
     }
     *num_encoded = n;
@@ -323,6 +348,7 @@ static tdb_error encode_trails(const tdb_item *items,
                                          &n,
                                          &encoded_size,
                                          prev_items,
+                                         num_fields,
                                          &ev)))
                 goto done;
 

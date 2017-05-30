@@ -394,28 +394,32 @@ TDB_EXPORT tdb_error tdb_cons_add(tdb_cons *cons,
         cons->min_timestamp = timestamp;
 
     for (i = 0; i < cons->num_ofields; i++){
-        tdb_field field = (tdb_field)(i + 1);
-        tdb_val val = 0;
-        tdb_item item;
-        void *dst;
-
+        /*
+        To conserve space (and time), only store non-empty values.
+        Missing fields are intepreted as nulls during encoding.
+        */
         if (value_lengths[i]){
+            tdb_field field = (tdb_field)(i + 1);
+            tdb_val val = 0;
+            tdb_item item;
+            void *dst;
+
             if (!(val = (tdb_val)jsm_insert(&cons->lexicons[i],
                                             values[i],
                                             value_lengths[i])))
                 return TDB_ERR_NOMEM;
 
-        }
-        item = tdb_make_item(field, val);
-        if (!(dst = arena_add_item(&cons->items)))
-            /*
-            cons->items is a file-backed arena, so this is most
-            likely caused by disk being full, hence an IO error.
-            */
-            return TDB_ERR_IO_WRITE;
+            item = tdb_make_item(field, val);
+            if (!(dst = arena_add_item(&cons->items)))
+                /*
+                cons->items is a file-backed arena, so this is most
+                likely caused by disk being full, hence an IO error.
+                */
+                return TDB_ERR_IO_WRITE;
 
-        memcpy(dst, &item, sizeof(tdb_item));
-        ++event->num_items;
+            memcpy(dst, &item, sizeof(tdb_item));
+            ++event->num_items;
+        }
     }
     return 0;
 }
@@ -572,21 +576,25 @@ static tdb_error append_event_map(tdb_cons *cons,
 
     for (i = 0; i < event->num_items; i++){
         tdb_val val = tdb_item_val(event->items[i]);
-        tdb_field field = tdb_item_field(event->items[i]);
-        tdb_val new_val = 0;
-        /* translate val */
-        if (val)
-            new_val = lexicon_maps[field - 1][val - 1];
-        tdb_item item = tdb_make_item(field, new_val);
-        void *dst = arena_add_item(&cons->items);
-        if (!dst)
-            /*
-            cons->items is a file-backed arena, so this is most
-            likely caused by disk being full, hence an IO error.
-            */
-            return TDB_ERR_IO_WRITE;
-        memcpy(dst, &item, sizeof(tdb_item));
-        ++new_event->num_items;
+        /*
+        To conserve space (and time), only store non-empty values.
+        Missing fields are intepreted as nulls during encoding.
+        */
+        if (val){
+            tdb_field field = tdb_item_field(event->items[i]);
+            /* translate val */
+            tdb_val new_val = lexicon_maps[field - 1][val - 1];
+            tdb_item item = tdb_make_item(field, new_val);
+            void *dst = arena_add_item(&cons->items);
+            if (!dst)
+                /*
+                cons->items is a file-backed arena, so this is most
+                likely caused by disk being full, hence an IO error.
+                */
+                return TDB_ERR_IO_WRITE;
+            memcpy(dst, &item, sizeof(tdb_item));
+            ++new_event->num_items;
+        }
     }
     return TDB_ERR_OK;
 }

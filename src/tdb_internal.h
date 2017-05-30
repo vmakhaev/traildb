@@ -183,6 +183,7 @@ tdb_error edge_encode_items(const tdb_item *items,
                             uint64_t *num_encoded,
                             uint64_t *encoded_size,
                             tdb_item *prev_items,
+                            uint64_t num_fields,
                             const struct tdb_grouped_event *ev);
 
 int file_mmap(const char *path,
