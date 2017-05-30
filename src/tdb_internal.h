@@ -108,6 +108,10 @@ struct _tdb_cons {
 
     char tempfile[TDB_MAX_PATH_SIZE];
 
+    /* cached key - optimization */
+    __uint128_t prev_uuid;
+    Word_t *uuid_ptr;
+
     /* options */
 
     uint64_t output_format;

@@ -294,6 +294,7 @@ TDB_EXPORT tdb_error tdb_cons_open(tdb_cons *cons,
         goto done;
     }
 
+    cons->uuid_ptr = NULL;
     cons->min_timestamp = UINT64_MAX;
     cons->num_ofields = num_ofields;
     cons->events.arena_increment = EVENTS_ARENA_INCREMENT;
@@ -374,12 +375,19 @@ TDB_EXPORT tdb_error tdb_cons_add(tdb_cons *cons,
         if (value_lengths[i] > TDB_MAX_VALUE_SIZE)
             return TDB_ERR_VALUE_TOO_LONG;
 
-    /*
-    TODO we could cache the lsat uuid_ptr in cons. It is very
-    typical to insert many events for a UUID consecutively.
-    */
     memcpy(&uuid_key, uuid, 16);
-    uuid_ptr = j128m_insert(&cons->trails, uuid_key);
+
+    /* optimization:
+    it is typical to insert many events for a UUID consecutively.
+    We don't need to lookup the same UUID repeatedly, we can use
+    the previously looked up value, cons->uuid_ptr, instead
+    */
+    if (cons->uuid_ptr && uuid_key == cons->prev_uuid)
+        uuid_ptr = cons->uuid_ptr;
+    else{
+        cons->prev_uuid = uuid_key;
+        uuid_ptr = cons->uuid_ptr = j128m_insert(&cons->trails, uuid_key);
+    }
 
     if (!(event = (struct tdb_cons_event*)arena_add_item(&cons->events)))
         return TDB_ERR_NOMEM;
@@ -674,6 +682,9 @@ TDB_EXPORT tdb_error tdb_cons_append(tdb_cons *cons, const tdb *db)
         if (strcmp(cons->ofield_names[field], tdb_get_field_name(db, field + 1)))
             return TDB_ERR_APPEND_FIELDS_MISMATCH;
 
+    /* invalidate cached UUID ptr */
+    cons->uuid_ptr = NULL;
+
     /* NOTE: When you add new options in tdb, remember to add them to
     the list below if they cause only a subset of events to be returned.
     */
@@ -784,6 +795,9 @@ TDB_EXPORT tdb_error tdb_cons_append_many(tdb_cons *cons,
                 return TDB_ERR_APPEND_FIELDS_MISMATCH;
             }
     }
+
+    /* invalidate cached UUID ptr */
+    cons->uuid_ptr = NULL;
 
     if (!(values = malloc(num_fields * sizeof(char*))))
         goto done;
