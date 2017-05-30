@@ -198,6 +198,8 @@ int op_merge(struct tdbcli_options *opt,
                 "library not up-to-date?");
 
     if (equal_fields){
+        if (opt->verbose)
+            fprintf(stderr, "Using optimized merge (tdb_cons_append_many).\n");
         if ((err = tdb_cons_append_many(cons, (const tdb**)dbs, num_inputs)))
             DIE("Merging failed: %s", tdb_error_str(err));
     }else{
@@ -205,6 +207,8 @@ int op_merge(struct tdbcli_options *opt,
         TODO tdb_cons_append_many should be used here as well,
         once it will work with mismatching fields
         */
+        if (opt->verbose)
+            fprintf(stderr, "Using non-optimized merge.\n");
         for (i = 0; i < num_inputs; i++)
             map_fields_and_append(cons, dbs[i], fields, num_fields);
         tdb_dontneed(dbs[i]);
