@@ -24,8 +24,14 @@
 #include "tdb_package.h"
 #include "arena.h"
 
+#include "pqueue/pqueue.h"
+
 #ifndef EVENTS_ARENA_INCREMENT
 #define EVENTS_ARENA_INCREMENT 1000000
+#endif
+
+#ifndef CONS_APPEND_MANY_NUM_EVENTS
+#define CONS_APPEND_MANY_NUM_EVENTS 10000
 #endif
 
 struct jm_fold_state{
@@ -368,6 +374,10 @@ TDB_EXPORT tdb_error tdb_cons_add(tdb_cons *cons,
         if (value_lengths[i] > TDB_MAX_VALUE_SIZE)
             return TDB_ERR_VALUE_TOO_LONG;
 
+    /*
+    TODO we could cache the lsat uuid_ptr in cons. It is very
+    typical to insert many events for a UUID consecutively.
+    */
     memcpy(&uuid_key, uuid, 16);
     uuid_ptr = j128m_insert(&cons->trails, uuid_key);
 
@@ -410,6 +420,34 @@ TDB_EXPORT tdb_error tdb_cons_add(tdb_cons *cons,
     return 0;
 }
 
+static tdb_error append_event_str(tdb_cons *cons,
+                                  const tdb *db,
+                                  const uint8_t *uuid,
+                                  const tdb_event *event,
+                                  const char **values,
+                                  uint64_t *lengths,
+                                  uint64_t num_fields)
+{
+    uint64_t i;
+    tdb_error ret;
+    memset(lengths, 0, num_fields * sizeof(uint64_t));
+
+    for (i = 0; i < event->num_items; i++){
+        tdb_field field = tdb_item_field(event->items[i]);
+        tdb_val val = tdb_item_val(event->items[i]);
+        values[field - 1] = tdb_get_value(db,
+                                          field,
+                                          val,
+                                          &lengths[field - 1]);
+    }
+
+    return tdb_cons_add(cons,
+                        uuid,
+                        event->timestamp,
+                        values,
+                        lengths);
+}
+
 /*
 this function adds events from db to cons one by one, using the
 public API. We need to use this with filtered dbs or otherwise when
@@ -419,7 +457,7 @@ static tdb_error tdb_cons_append_subset_lexicon(tdb_cons *cons, const tdb *db)
 {
     const char **values = NULL;
     uint64_t *lengths = NULL;
-    uint64_t i, trail_id;
+    uint64_t trail_id;
     int ret = 0;
     const uint64_t num_fields = tdb_num_fields(db);
 
@@ -449,25 +487,13 @@ static tdb_error tdb_cons_append_subset_lexicon(tdb_cons *cons, const tdb *db)
         if (tdb_cursor_peek(cursor)){
             const uint8_t *uuid = tdb_get_uuid(db, trail_id);
             while ((event = tdb_cursor_next(cursor))){
-                /*
-                with TDB_OPT_ONLY_DIFF_ITEMS event->items may be sparse,
-                hence we need to reset lengths to zero
-                */
-                memset(lengths, 0, num_fields * sizeof(uint64_t));
-                for (i = 0; i < event->num_items; i++){
-                    tdb_field field = tdb_item_field(event->items[i]);
-                    tdb_val val = tdb_item_val(event->items[i]);
-                    values[field - 1] = tdb_get_value(db,
-                                                      field,
-                                                      val,
-                                                      &lengths[field - 1]);
-                }
-
-                if ((ret = tdb_cons_add(cons,
-                                        uuid,
-                                        event->timestamp,
-                                        values,
-                                        lengths)))
+                if ((ret = append_event_str(cons,
+                                            db,
+                                            uuid,
+                                            event,
+                                            values,
+                                            lengths,
+                                            num_fields)))
                     goto done;
             }
         }
@@ -526,10 +552,10 @@ error:
 Take an event from the old db, translate its items to new vals
 and append to the new cons
 */
-static tdb_error append_event(tdb_cons *cons,
-                              const tdb_event *event,
-                              Word_t *uuid_ptr,
-                              tdb_val **lexicon_maps)
+static tdb_error append_event_map(tdb_cons *cons,
+                                  const tdb_event *event,
+                                  Word_t *uuid_ptr,
+                                  tdb_val **lexicon_maps)
 {
     uint64_t i;
     struct tdb_cons_event *new_event =
@@ -605,7 +631,10 @@ static tdb_error tdb_cons_append_full_lexicon(tdb_cons *cons, const tdb *db)
             memcpy(&uuid_key, tdb_get_uuid(db, trail_id), 16);
             uuid_ptr = j128m_insert(&cons->trails, uuid_key);
             while ((event = tdb_cursor_next(cursor)))
-                if ((ret = append_event(cons, event, uuid_ptr, lexicon_maps)))
+                if ((ret = append_event_map(cons,
+                                            event,
+                                            uuid_ptr,
+                                            lexicon_maps)))
                     goto done;
         }
     }
@@ -656,6 +685,189 @@ TDB_EXPORT tdb_error tdb_cons_append(tdb_cons *cons, const tdb *db)
         return tdb_cons_append_full_lexicon(cons, db);
 }
 
+struct uuid_node{
+    uintptr_t uuid;
+    __uint128_t key;
+    size_t pos;
+    const tdb *db;
+    uint64_t trail_id;
+    uint64_t num_trails;
+    tdb_cursor *cursor;
+};
+
+/* pqueue callback functions */
+
+static int cmp_pri(pqueue_pri_t a, pqueue_pri_t b)
+{
+    __uint128_t key_a, key_b;
+    const void *ptr_a = (const void*)a;
+    const void *ptr_b = (const void*)b;
+    memcpy(&key_a, ptr_a, 16);
+    memcpy(&key_b, ptr_b, 16);
+    return key_a > key_b;
+}
+
+static pqueue_pri_t get_pri(void *a)
+{
+	return (pqueue_pri_t)((struct uuid_node*)a)->uuid;
+}
+
+static void set_pri(void *a, pqueue_pri_t other_pri)
+{
+	((struct uuid_node*)a)->uuid = (uintptr_t)other_pri;
+}
+
+static size_t get_pos(void *a)
+{
+	return ((struct uuid_node*)a)->pos;
+}
+
+static void set_pos(void *a, size_t pos)
+{
+    ((struct uuid_node*)a)->pos = pos;
+}
+
+static inline void insert_node(pqueue_t *queue, struct uuid_node *node)
+{
+    const void *uuid = tdb_get_uuid(node->db, node->trail_id);
+    node->uuid = (uintptr_t)uuid;
+    memcpy(&node->key, uuid, 16);
+    pqueue_insert(queue, node);
+}
+
+static void print_node(struct uuid_node *node)
+{
+    uint8_t hex[32];
+    tdb_uuid_hex((const uint8_t*)node->uuid, hex);
+    printf("HEX %.32s\n", hex);
+}
+
+TDB_EXPORT tdb_error tdb_cons_append_many(tdb_cons *cons,
+                                          const tdb **dbs,
+                                          uint32_t num_dbs)
+{
+    /* priority queue */
+    pqueue_t *queue = NULL;
+    /* elements of the queue */
+    struct uuid_node *trails = NULL;
+    /* next element to be processed */
+    struct uuid_node *node = NULL;
+
+    tdb_cursor **cursors = NULL;
+    tdb_multi_cursor *mcursor = NULL;
+
+    const char **values = NULL;
+    uint64_t *lengths = NULL;
+
+    tdb_multi_event *events = NULL;
+
+    uint64_t i, j, n;
+    uint64_t num_fields = cons->num_ofields + 1;
+    tdb_error ret = TDB_ERR_NOMEM;
+
+    for (i = 0; i < num_dbs; i++){
+        tdb_field field;
+        if (num_fields != dbs[i]->num_fields)
+            return TDB_ERR_APPEND_FIELDS_MISMATCH;
+
+        for (field = 0; field < cons->num_ofields; field++)
+            if (strcmp(cons->ofield_names[field],
+                       tdb_get_field_name(dbs[i], field + 1))){
+                return TDB_ERR_APPEND_FIELDS_MISMATCH;
+            }
+    }
+
+    if (!(values = malloc(num_fields * sizeof(char*))))
+        goto done;
+
+    if (!(lengths = malloc(num_fields * sizeof(uint64_t))))
+        goto done;
+
+    if (!(trails = calloc(num_dbs, sizeof(struct uuid_node))))
+        goto done;
+
+    if (!(cursors = malloc(num_dbs * sizeof(tdb_cursor*))))
+        goto done;
+
+    if (!(events = malloc(CONS_APPEND_MANY_NUM_EVENTS
+                          * sizeof(tdb_multi_event))))
+        goto done;
+
+    if (!(queue = pqueue_init(num_dbs,
+                              cmp_pri,
+                              get_pri,
+                              set_pri,
+                              get_pos,
+                              set_pos)))
+        goto done;
+
+    for (i = 0, j = 0; i < num_dbs; i++){
+        if ((trails[i].num_trails = tdb_num_trails(dbs[i]))){
+            trails[i].db = dbs[i];
+            trails[i].trail_id = 0;
+            trails[i].cursor = cursors[j++] = tdb_cursor_new(dbs[i]);
+            insert_node(queue, &trails[i]);
+        }
+    }
+
+    if (!(mcursor = tdb_multi_cursor_new(cursors, j)))
+        goto done;
+
+    while ((node = (struct uuid_node*)pqueue_pop(queue))){
+        const uint8_t *uuid = (const uint8_t*)node->uuid;
+        __uint128_t key = node->key;
+
+        if ((ret = tdb_get_trail(node->cursor, node->trail_id)))
+            goto done;
+        if (++node->trail_id < node->num_trails)
+            insert_node(queue, node);
+
+        while (1){
+            node = (struct uuid_node*)pqueue_peek(queue);
+            if (!(node && node->key == key))
+                break;
+            node = (struct uuid_node*)pqueue_pop(queue);
+
+            if ((ret = tdb_get_trail(node->cursor, node->trail_id)))
+                goto done;
+            if (++node->trail_id < node->num_trails)
+                insert_node(queue, node);
+        }
+
+        tdb_multi_cursor_reset(mcursor);
+
+        while ((n = tdb_multi_cursor_next_batch(mcursor,
+                                                events,
+                                                CONS_APPEND_MANY_NUM_EVENTS))){
+            for (i = 0; i < n; i++){
+                if ((ret = append_event_str(cons,
+                                            events[i].db,
+                                            uuid,
+                                            events[i].event,
+                                            values,
+                                            lengths,
+                                            num_fields)))
+                    goto done;
+            }
+        }
+    }
+
+    ret = 0;
+done:
+    if (queue)
+        pqueue_free(queue);
+    if (trails){
+        for (i = 0; i < num_dbs; i++)
+            tdb_cursor_free(cursors[i]);
+        free(trails);
+    }
+    tdb_multi_cursor_free(mcursor);
+    free(values);
+    free(lengths);
+    free(cursors);
+    free(events);
+    return ret;
+}
 
 TDB_EXPORT tdb_error tdb_cons_finalize(tdb_cons *cons)
 {

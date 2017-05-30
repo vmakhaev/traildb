@@ -51,6 +51,11 @@ tdb_error tdb_cons_add(tdb_cons *cons,
 /* Merge an existing TrailDB to this constructor */
 tdb_error tdb_cons_append(tdb_cons *cons, const tdb *db);
 
+/* Merge multiple existing TrailDB to this constructor */
+tdb_error tdb_cons_append_many(tdb_cons *cons,
+                               const tdb **dbs,
+                               uint32_t num_dbs);
+
 /* Finalize a constructor */
 tdb_error tdb_cons_finalize(tdb_cons *cons);
 

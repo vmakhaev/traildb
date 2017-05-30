@@ -55,6 +55,16 @@ static int compare(const void *p1, const void *p2)
     return 0;
 }
 
+static void reverse(struct tdb_grouped_event *buf, uint64_t num_events)
+{
+    uint64_t i;
+    for (i = 0; i < num_events / 2; i++){
+        struct tdb_grouped_event tmp = buf[i];
+        buf[i] = buf[num_events - (i + 1)];
+        buf[num_events - (i + 1)] = tmp;
+    }
+}
+
 static void *groupby_uuid_handle_one_trail(
     __uint128_t uuid __attribute__((unused)),
     Word_t *value,
@@ -66,6 +76,8 @@ static void *groupby_uuid_handle_one_trail(
     uint64_t j = 0;
     uint64_t num_events = 0;
     int ret = 0;
+    uint64_t prev_timestamp = UINT64_MAX;
+    int events_in_reverse_order = 1;
 
     if (s->ret)
         return s;
@@ -86,6 +98,11 @@ static void *groupby_uuid_handle_one_trail(
         s->buf[j].num_items = ev->num_items;
         s->buf[j].timestamp = ev->timestamp;
 
+        if (ev->timestamp <= prev_timestamp)
+            prev_timestamp = ev->timestamp;
+        else
+            events_in_reverse_order = 0;
+
         /* TODO write a test for an extra long (>2^32) trail */
         if (++j == TDB_MAX_TRAIL_LENGTH){
             ret = TDB_ERR_TRAIL_TOO_LONG;
@@ -99,14 +116,25 @@ static void *groupby_uuid_handle_one_trail(
     }
     num_events = j;
 
-    /* sort events of this trail by time */
-    /* TODO make this stable sort */
-    /* TODO this could really benefit from Timsort since raw data
-       is often partially sorted */
-    qsort(s->buf, num_events, sizeof(struct tdb_grouped_event), compare);
+    /* the following ensures that events of this trail are sorted by time */
+
+    /*
+    optimization:
+    often events are inserted in the order of ascending time, so there's
+    no need to sort anything, just reverse the result of backlinks
+    traversed above. In particular, this is guaranteed to happen with
+    tdb_cons_append_many() which is used to merge multiple tdbs together.
+    */
+    if (events_in_reverse_order)
+        reverse(s->buf, num_events);
+    else
+        /* TODO make this stable sort */
+        /* TODO this could really benefit from Timsort since raw data
+           is often partially sorted */
+        qsort(s->buf, num_events, sizeof(struct tdb_grouped_event), compare);
 
     /* delta-encode timestamps */
-    uint64_t prev_timestamp = s->min_timestamp;
+    prev_timestamp = s->min_timestamp;
     for (j = 0; j < num_events; j++){
         uint64_t timestamp = s->buf[j].timestamp;
         uint64_t delta = timestamp - prev_timestamp;
