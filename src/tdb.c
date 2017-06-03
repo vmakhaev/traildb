@@ -65,15 +65,15 @@ int file_mmap(const char *fname,
     dst->size = dst->mmap_size = (uint64_t)stats.st_size;
     dst->data = dst->ptr = MAP_FAILED;
 
-    if (dst->size > 0)
+    if (dst->size > 0){
         dst->ptr = mmap(NULL, dst->size, PROT_READ, MAP_SHARED, fd, 0);
-
-    if (dst->ptr == MAP_FAILED){
-        ret = -1;
-        goto done;
-    }
-
-    dst->data = dst->ptr;
+        if (dst->ptr == MAP_FAILED){
+            ret = -1;
+            goto done;
+        }
+        dst->data = dst->ptr;
+    }else
+        dst->data = dst->ptr = NULL;
 done:
     if (fd)
         close(fd);

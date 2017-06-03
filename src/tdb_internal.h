@@ -106,7 +106,8 @@ struct _tdb_cons {
     struct judy_128_map trails;
     struct judy_str_map *lexicons;
 
-    char tempfile[TDB_MAX_PATH_SIZE];
+    char tempfile_items[TDB_MAX_PATH_SIZE];
+    char tempfile_events[TDB_MAX_PATH_SIZE];
 
     /* cached key - optimization */
     __uint128_t prev_uuid;
@@ -180,7 +181,9 @@ const char *tdb_lexicon_get(const struct tdb_lexicon *lex,
                             tdb_val i,
                             uint64_t *length);
 
-tdb_error tdb_encode(tdb_cons *cons, const tdb_item *items);
+tdb_error tdb_encode(tdb_cons *cons,
+                     const struct tdb_cons_event *events,
+                     const tdb_item *items);
 
 tdb_error edge_encode_items(const tdb_item *items,
                             tdb_item **encoded,

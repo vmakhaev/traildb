@@ -26,10 +26,6 @@
 
 #include "pqueue/pqueue.h"
 
-#ifndef EVENTS_ARENA_INCREMENT
-#define EVENTS_ARENA_INCREMENT 1000000
-#endif
-
 #ifndef CONS_APPEND_MANY_NUM_EVENTS
 #define CONS_APPEND_MANY_NUM_EVENTS 10000
 #endif
@@ -297,20 +293,28 @@ TDB_EXPORT tdb_error tdb_cons_open(tdb_cons *cons,
     cons->uuid_ptr = NULL;
     cons->min_timestamp = UINT64_MAX;
     cons->num_ofields = num_ofields;
-    cons->events.arena_increment = EVENTS_ARENA_INCREMENT;
     cons->events.item_size = sizeof(struct tdb_cons_event);
     cons->items.item_size = sizeof(tdb_item);
 
     /* Opportunistically try to create the output directory.
        We don't care if it fails, e.g. because it already exists */
     mkdir(root, 0755);
-    TDB_PATH(cons->tempfile, "%s/tmp.items.XXXXXX", root);
-    if ((fd = mkstemp(cons->tempfile)) == -1){
+    TDB_PATH(cons->tempfile_items, "%s/tmp.items.XXXXXX", root);
+    if ((fd = mkstemp(cons->tempfile_items)) == -1){
+        ret = TDB_ERR_IO_OPEN;
+        goto done;
+    }
+    if (!(cons->items.fd = fdopen(fd, "w"))){
         ret = TDB_ERR_IO_OPEN;
         goto done;
     }
 
-    if (!(cons->items.fd = fdopen(fd, "w"))){
+    TDB_PATH(cons->tempfile_events, "%s/tmp.events.XXXXXX", root);
+    if ((fd = mkstemp(cons->tempfile_events)) == -1){
+        ret = TDB_ERR_IO_OPEN;
+        goto done;
+    }
+    if (!(cons->events.fd = fdopen(fd, "w"))){
         ret = TDB_ERR_IO_OPEN;
         goto done;
     }
@@ -704,33 +708,46 @@ TDB_EXPORT tdb_error tdb_cons_append(tdb_cons *cons, const tdb *db)
         return tdb_cons_append_full_lexicon(cons, db);
 }
 
+static tdb_error close_and_mmap(const char *path,
+                                struct arena *arena,
+                                struct tdb_file *dst)
+{
+    tdb_error ret = 0;
+    memset(dst, 0, sizeof(struct tdb_file));
+
+    if (arena->fd){
+        if ((ret = arena_flush(arena)))
+            return ret;
+        if (fclose(arena->fd)){
+            arena->fd = NULL;
+            return TDB_ERR_IO_CLOSE;
+        }
+    }
+    arena->fd = NULL;
+
+    if (file_mmap(path, NULL, dst, NULL))
+        return TDB_ERR_IO_READ;
+    return 0;
+}
+
 TDB_EXPORT tdb_error tdb_cons_finalize(tdb_cons *cons)
 {
-    struct tdb_file items_mmapped;
+    struct tdb_file items_mmapped = {.ptr = NULL};
+    struct tdb_file events_mmapped = {.ptr = NULL};
     uint64_t num_events = cons->events.next;
-    int ret = 0;
+    tdb_error ret = 0;
 
-    memset(&items_mmapped, 0, sizeof(struct tdb_file));
+    if ((ret = close_and_mmap(cons->tempfile_items,
+                              &cons->items,
+                              &items_mmapped)))
+        return ret;
 
-    /* finalize event items */
-    if ((ret = arena_flush(&cons->items)))
-        goto done;
+    if ((ret = close_and_mmap(cons->tempfile_events,
+                              &cons->events,
+                              &events_mmapped)))
+        return ret;
 
-    if (cons->items.fd && fclose(cons->items.fd)) {
-        cons->items.fd = NULL;
-        ret = TDB_ERR_IO_CLOSE;
-        goto done;
-    }
-    cons->items.fd = NULL;
-
-    if (cons->tempfile[0]){
-        if (num_events && cons->num_ofields) {
-            if (file_mmap(cons->tempfile, NULL, &items_mmapped, NULL)){
-                ret = TDB_ERR_IO_READ;
-                goto done;
-            }
-        }
-
+    if (cons->tempfile_items[0]){
         TDB_TIMER_DEF
 
         TDB_TIMER_START
@@ -749,16 +766,22 @@ TDB_EXPORT tdb_error tdb_cons_finalize(tdb_cons *cons)
         TDB_TIMER_END("encoder/store_version")
 
         TDB_TIMER_START
-        if ((ret = tdb_encode(cons, (const tdb_item*)items_mmapped.data)))
+        if ((ret = tdb_encode(cons,
+                              (const struct tdb_cons_event*)events_mmapped.data,
+                              (const tdb_item*)items_mmapped.data)))
             goto done;
         TDB_TIMER_END("encoder/encode")
     }
 done:
     if (items_mmapped.ptr)
         munmap(items_mmapped.ptr, items_mmapped.mmap_size);
+    if (events_mmapped.ptr)
+        munmap(events_mmapped.ptr, events_mmapped.mmap_size);
 
-    if (cons->tempfile[0])
-        unlink(cons->tempfile);
+    if (cons->tempfile_items[0])
+        unlink(cons->tempfile_items);
+    if (cons->tempfile_events[0])
+        unlink(cons->tempfile_events);
 
     if (!ret){
         #ifdef HAVE_ARCHIVE_H

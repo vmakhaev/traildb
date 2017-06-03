@@ -450,7 +450,9 @@ done:
     return ret;
 }
 
-tdb_error tdb_encode(tdb_cons *cons, const tdb_item *items)
+tdb_error tdb_encode(tdb_cons *cons,
+                     const struct tdb_cons_event *events,
+                     const tdb_item *items)
 {
     char path[TDB_MAX_PATH_SIZE];
     char grouped_path[TDB_MAX_PATH_SIZE];
@@ -499,9 +501,9 @@ tdb_error tdb_encode(tdb_cons *cons, const tdb_item *items)
         goto done;
     }
 
-    if (cons->events.data)
+    if (events)
         if ((ret = groupby_uuid(grouped_w,
-                                (struct tdb_cons_event*)cons->events.data,
+                                events,
                                 cons,
                                 &num_trails,
                                 &max_timestamp,
@@ -512,10 +514,7 @@ tdb_error tdb_encode(tdb_cons *cons, const tdb_item *items)
     not the most clean separation of ownership here, but these objects
     can be huge so keeping them around unecessarily is expensive
     */
-    free(cons->events.data);
-    cons->events.data = NULL;
     j128m_free(&cons->trails);
-
     TDB_CLOSE(grouped_w);
     grouped_w = NULL;
 
