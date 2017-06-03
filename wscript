@@ -14,7 +14,7 @@ VERSION = "0.6"
 
 SKIP_TESTS = []
 if sys.platform == "darwin":
-    SKIP_TESTS += ["judy_128_map_test.c", "out_of_memory.c"]
+    SKIP_TESTS += ["judy_128_map_test.c"]
 
 errmsg_libarchive = "not found"
 errmsg_judy = "not found"
@@ -72,7 +72,6 @@ def build(bld, test_build=False):
     ]
     if bld.variant == "test":
         tdbcflags.extend([
-            "-DEVENTS_ARENA_INCREMENT=100",
             "-fprofile-arcs",
             "-ftest-coverage",
             "--coverage",
