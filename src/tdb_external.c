@@ -14,7 +14,7 @@
 #include "tdb_external.h"
 #include "tdb_external_priv.h"
 
-#define DEFAULT_HOST "192.168.1.30"
+#define DEFAULT_HOST "192.168.1.72"
 #define DEFAULT_PORT "9009"
 #define DEFAULT_CONNECT_TIMEOUT 60000
 #define DEFAULT_RETRY_TIMEOUT 0
